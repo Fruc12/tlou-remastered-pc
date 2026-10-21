@@ -367,7 +367,7 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
                     vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
                     int index, u32 pixel_bytes = 4,
                     vk::ImageAspectFlags aspect = vk::ImageAspectFlagBits::eColor,
-                    u32 block_width = 1, u32 block_height = 1, u32 layer = 0) {
+                    u32 block_width = 1, u32 block_height = 1, u32 layer = 0, u32 level = 0) {
     const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                        .size = VkDeviceSize((w + block_width - 1) / block_width) *
                                                ((h + block_height - 1) / block_height) * pixel_bytes,
@@ -383,7 +383,7 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
         return;
     }
     cmdbuf.copyImageToBuffer(image, layout, buffer,
-                             vk::BufferImageCopy{.imageSubresource = {aspect, 0, layer, 1},
+                             vk::BufferImageCopy{.imageSubresource = {aspect, level, layer, 1},
                                                  .imageExtent = {w, h, 1}});
     const char* dir = std::getenv("GOW3_DUMP_DIR");
     char path[512];
@@ -525,6 +525,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                             image.info.size.height, layer_name.c_str(), frame_dump_index, bytes,
                             depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor,
                             compressed ? 4 : 1, compressed ? 4 : 1, layer);
+                }
+                // Further mip levels of uncompressed color images as <name>_M<n> (bloom chains).
+                for (u32 level = 1; !depth && !compressed && level < std::min<u32>(image.info.resources.levels, 8);
+                     ++level) {
+                    const u32 level_w = std::max(image.info.size.width >> level, 1u);
+                    const u32 level_h = std::max(image.info.size.height >> level, 1u);
+                    const auto level_name = std::format("{}_M{}", name, level);
+                    DumpRaw(instance, draw_scheduler, cmdbuf, image.GetImage(),
+                            vk::ImageLayout::eTransferSrcOptimal, level_w, level_h, level_name.c_str(),
+                            frame_dump_index, bytes, vk::ImageAspectFlagBits::eColor, 1, 1, 0, level);
                 }
                 // Keep enough layout/state evidence to compare the cached image with a
                 // separate read-only guest-memory snapshot. Do not refresh the image here:

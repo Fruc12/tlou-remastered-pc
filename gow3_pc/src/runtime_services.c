@@ -237,7 +237,8 @@ static ABI int32_t voice_info(uint32_t port,uint32_t *info) {
 /* ---- Common dialogs: nothing is displayed; an opened dialog finishes. ---- */
 typedef struct { const char *name; int initialized, status; uint32_t button; } Dialog;
 static Dialog dialogs[]={{"CommonDialog",0,0,0},{"MsgDialog",0,0,0},{"SaveDataDialog",0,0,0},
-                         {"NpProfileDialog",0,0,0},{"NpCommerceDialog",0,0,0},{"ImeDialog",0,0,0}};
+                         {"NpProfileDialog",0,0,0},{"NpCommerceDialog",0,0,0},{"ImeDialog",0,0,0},
+                         {"InvitationDialog",0,0,0},{"NpSnsFacebookDialog",0,0,0}};
 #define DIALOG_RUNNING 2
 #define DIALOG_FINISHED 3
 #define DIALOG_NOT_FINISHED ((int32_t)0x80B80005)
@@ -691,6 +692,38 @@ static ABI int32_t mouse_read(int32_t handle,unsigned char *data,int32_t count) 
 static ABI int32_t mouse_close(int32_t handle) { (void)handle; return 0; }
 static ABI int32_t audio_in_open(void) { return AUDIO_IN_NOT_OPENED; }
 
+/* ---- The Last of Us Remastered: more of the same contracts ---- */
+static ABI int32_t posix_inet_pton(int af,const char *src,void *dst) {
+    if (af!=2) { *runtime_errno()=47; return -1; } /* EAFNOSUPPORT */
+    return inet_pton(AF_INET,src,dst);
+}
+static ABI uint64_t net_htonll(uint64_t v) { return __builtin_bswap64(v); }
+/* Voice chat: ports carry no audio; their volume and mute flag read back as default. */
+static ABI int32_t voice_mute_flag(uint32_t port,uint32_t *flag) { (void)port; if (!flag) return (int32_t)0x8029000b; *flag=0; return 0; }
+static ABI int32_t voice_volume(uint32_t port,float *volume) { (void)port; if (!volume) return (int32_t)0x8029000b; *volume=1.0f; return 0; }
+/* A USB keyboard (libSceIme) opens but none is ever connected: no events arrive. */
+static ABI int32_t ime_keyboard_open(int32_t user,const void *param) { (void)user; return param ? 0 : (int32_t)0x80BC0004; }
+static ABI int32_t ime_keyboard_resources(int32_t user,int32_t *ids) {
+    if (!ids) return (int32_t)0x80BC0004;
+    ids[0]=user; memset(ids+1,0,5*sizeof(*ids)); /* userId, resourceId[5]: none */
+    return 0;
+}
+/* Picture decoders/encoders (profile pictures, photo mode sharing): not provided. */
+static ABI int32_t picture_unsupported(void) {
+    note("picture decoder/encoder requested: not provided");
+    return (int32_t)0x80650001;
+}
+/* SDK heap tracing (Razor): no trace data. HeapInfoInfo: size, flag, getSegmentInfo,
+ * mspace_atomic_id_mask*, mstate_table*. */
+static uint64_t heap_trace_mask, heap_trace_table[64];
+static ABI void heap_trace_info(unsigned char *info) {
+    if (!info) return;
+    uint32_t zero=0; void *mask=&heap_trace_mask, *table=heap_trace_table;
+    memcpy(info+8,&zero,4); memcpy(info+12,&zero,4);
+    memcpy(info+16,&mask,8); memcpy(info+24,&table,8);
+}
+DIALOG(invitation,6) DIALOG(facebook,7)
+
 
 static const RuntimeExport exports[]={
     {"sceUserServiceInitialize",user_initialize}, {"sceUserServiceTerminate",user_terminate},
@@ -829,6 +862,50 @@ static const RuntimeExport exports[]={
     {"sceAudioInOpen",audio_in_open},
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd}, {"sceDiscMap_8A828CAEE7EDD5E9",discmap_8a82},
     {"sceVoiceInit",ok_void}, {"sceVoiceEnd",ok_void},
+    {"inet_pton",posix_inet_pton}, {"getpeername",posix_socket_badf}, {"getsockopt",posix_socket_badf},
+    {"recvfrom",posix_socket_badf}, {"sendto",posix_socket_badf}, {"shutdown",posix_socket_badf},
+    {"sceNetGetpeername",net_unreachable}, {"sceNetHtonll",net_htonll}, {"sceNetNtohll",net_htonll},
+    {"sceNetCtlInit",ok_void},
+    {"sceHttpGetAllResponseHeaders",http_fail}, {"sceHttpParseResponseHeader",http_fail},
+    {"sceHttpUriBuild",http_fail}, {"sceHttpUriParse",http_fail},
+    {"sceHttpRemoveRequestHeader",ok_void}, {"sceHttpsSetSslCallback",ok_void},
+    {"sceNpCreateRequest",np_request}, {"sceNpGetAccountCountry",np_signed_out},
+    {"sceNpGetAccountIdA",np_signed_out},
+    {"sceNpInGameMessageInitialize",lib_init_id}, {"sceNpInGameMessageCreateHandle",np_request_ctx},
+    {"sceNpInGameMessagePrepare",np_signed_out}, {"sceNpInGameMessageSendData",np_signed_out},
+    {"sceNpInGameMessageAbortHandle",ok_void}, {"sceNpInGameMessageTerminate",ok_void},
+    {"sceNpWebApiCreateHandle",np_signed_out}, {"sceNpWebApiSendRequest2",np_signed_out},
+    {"sceNpWebApiCreateExtdPushEventFilter",np_signed_out}, {"sceNpWebApiDeleteExtdPushEventFilter",ok_void},
+    {"sceNpWebApiCreateServicePushEventFilter",np_signed_out}, {"sceNpWebApiDeleteServicePushEventFilter",ok_void},
+    {"sceNpWebApiRegisterExtdPushEventCallback",np_signed_out}, {"sceNpWebApiUnregisterExtdPushEventCallback",ok_void},
+    {"sceNpWebApiRegisterServicePushEventCallback",np_signed_out},
+    {"sceNpSignalingGetConnectionFromNpId",np_signed_out}, {"sceNpSignalingGetPeerNetInfoResult",np_signed_out},
+    {"sceNpCommerceShowPsStoreIcon",ok_void}, {"sceNpCommerceHidePsStoreIcon",ok_void},
+    {"sceNpAuthCreateRequest",np_request}, {"sceNpAuthAbortRequest",ok_void},
+    {"sceNpLookupCreateRequest",np_request_ctx},
+    {"sceNpSnsFacebookCreateRequest",np_request}, {"sceNpSnsFacebookAbortRequest",ok_void},
+    {"sceNpSnsFacebookDeleteRequest",ok_void}, {"sceNpSnsFacebookGetAccessToken",np_signed_out},
+    {"sceVoiceGetMuteFlag",voice_mute_flag}, {"sceVoiceGetVolume",voice_volume},
+    {"sceVoiceSetMuteFlag",ok_void}, {"sceVoiceSetMuteFlagAll",ok_void}, {"sceVoiceSetVolume",ok_void},
+    {"sceImeKeyboardOpen",ime_keyboard_open}, {"sceImeKeyboardClose",ok_void},
+    {"sceImeKeyboardGetResourceId",ime_keyboard_resources}, {"sceImeUpdate",ok_void},
+    {"scePngDecCreate",picture_unsupported}, {"scePngDecDecode",picture_unsupported},
+    {"scePngDecDelete",ok_void}, {"scePngDecParseHeader",picture_unsupported},
+    {"scePngDecQueryMemorySize",picture_unsupported},
+    {"sceJpegDecCreate",picture_unsupported}, {"sceJpegDecDecode",picture_unsupported},
+    {"sceJpegDecDelete",ok_void}, {"sceJpegDecParseHeader",picture_unsupported},
+    {"sceJpegDecQueryMemorySize",picture_unsupported},
+    {"sceJpegEncCreate",picture_unsupported}, {"sceJpegEncEncode",picture_unsupported},
+    {"sceJpegEncDelete",ok_void}, {"sceJpegEncQueryMemorySize",picture_unsupported},
+    {"sceInvitationDialogInitialize",invitation_init}, {"sceInvitationDialogOpen",invitation_open},
+    {"sceInvitationDialogUpdateStatus",invitation_status}, {"sceInvitationDialogTerminate",invitation_term},
+    {"sceInvitationDialogGetResult",profile_result},
+    {"sceNpSnsFacebookDialogInitialize",facebook_init}, {"sceNpSnsFacebookDialogOpen",facebook_open},
+    {"sceNpSnsFacebookDialogUpdateStatus",facebook_status}, {"sceNpSnsFacebookDialogTerminate",facebook_term},
+    {"sceNpSnsFacebookDialogGetResult",profile_result},
+    {"sceCoredumpRegisterCoredumpHandler",ok_void}, {"sceCoredumpWriteUserData",ok_void},
+    {"sceRemoteplayTerminate",ok_void}, {"sceLibcHeapGetTraceInfo",heap_trace_info},
+    {"sceDiscMapFunc_7C980FFB0AA27E7A",discmap_8a82},
 };
 uintptr_t runtime_services_resolve(const char *name) {
     if (!strcmp(name,"k1SwgkMSOM8#libSceRemoteplay")) return (uintptr_t)remoteplay_initialize;

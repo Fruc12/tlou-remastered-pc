@@ -127,11 +127,8 @@ static ABI int32_t rtc_get_time_t(const DateTime *t, int64_t *seconds) {
     uint64_t tick=to_tick(t);
     *seconds=tick<UNIX_EPOCH_TICKS ? 0 : (int64_t)((tick-UNIX_EPOCH_TICKS)/1000000); return 0;
 }
-/* "Wed, 25 Sep 2026 12:00:00 +0300" for the given UTC tick (NULL = now) in local time. */
-static ABI int32_t rtc_rfc2822_local(char *out, const uint64_t *utc_tick) {
-    if (!out) return ERR_INVALID_POINTER;
-    uint64_t utc=utc_tick ? *utc_tick : now_utc();
-    int64_t offset=local_offset(utc);
+/* "Wed, 25 Sep 2026 12:00:00 +0300" for the given UTC tick at the given offset (microseconds). */
+static int32_t rfc2822(char *out, uint64_t utc, int64_t offset) {
     DateTime t; from_tick((uint64_t)((int64_t)utc+offset),&t);
     static const char *days[]={"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     static const char *months[]={"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
@@ -143,6 +140,55 @@ static ABI int32_t rtc_rfc2822_local(char *out, const uint64_t *utc_tick) {
     memcpy(out,text,strlen(text)+1); /* 31 characters + NUL, the SDK's buffer size */
     return 0;
 }
+/* The given UTC tick (NULL = now) in local time, or at a time zone given in minutes east. */
+static ABI int32_t rtc_rfc2822_local(char *out, const uint64_t *utc_tick) {
+    if (!out) return ERR_INVALID_POINTER;
+    uint64_t utc=utc_tick ? *utc_tick : now_utc();
+    return rfc2822(out,utc,local_offset(utc));
+}
+static ABI int32_t rtc_rfc2822(char *out, const uint64_t *utc_tick, int32_t minutes) {
+    if (!out) return ERR_INVALID_POINTER;
+    return rfc2822(out,utc_tick ? *utc_tick : now_utc(),(int64_t)minutes*60000000);
+}
+static ABI int32_t rtc_add_seconds(uint64_t *out, const uint64_t *in, int64_t seconds) {
+    if (!out || !in) return ERR_INVALID_POINTER;
+    *out=*in+(uint64_t)(seconds*1000000); return 0;
+}
+/* RFC 3339 ("2026-09-25T12:00:00.5+03:00", "...Z") or RFC 2822 ("Wed, 25 Sep 2026 12:00:00
+ * +0300", the day name optional) into a UTC tick. */
+static ABI int32_t rtc_parse_date_time(uint64_t *utc, const char *text) {
+    if (!utc || !text) return ERR_INVALID_POINTER;
+    static const char *months[]={"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    DateTime t={0};
+    unsigned y,mo,d,h,mi,s; int n=0;
+    const char *p=text;
+    while (*p==' ') ++p;
+    if (sscanf(p,"%4u-%2u-%2u%*1[Tt ]%2u:%2u:%2u%n",&y,&mo,&d,&h,&mi,&s,&n)==6) p+=n;
+    else {
+        char month[4]={0};
+        const char *comma=strchr(p,',');
+        if (comma) p=comma+1;
+        if (sscanf(p," %2u %3s %4u %2u:%2u:%2u%n",&d,month,&y,&h,&mi,&s,&n)!=6) return (int32_t)0x80B50007; /* BAD_PARSE */
+        p+=n; mo=0;
+        for (unsigned i=0;i<12;++i) if (!strcmp(month,months[i])) mo=i+1;
+    }
+    t.year=(uint16_t)y; t.month=(uint16_t)mo; t.day=(uint16_t)d; t.hour=(uint16_t)h; t.minute=(uint16_t)mi; t.second=(uint16_t)s;
+    if (*p=='.') {
+        uint32_t scale=100000;
+        for (++p;*p>='0' && *p<='9';++p) { t.microsecond+=(uint32_t)(*p-'0')*scale; scale/=10; }
+    }
+    while (*p==' ') ++p;
+    int64_t offset=0;
+    if (*p=='+' || *p=='-') {
+        unsigned oh=0,om=0;
+        if (sscanf(p+1,"%2u:%2u",&oh,&om)!=2 && sscanf(p+1,"%2u%2u",&oh,&om)!=2) return (int32_t)0x80B50007;
+        offset=((int64_t)oh*60+om)*60000000*(*p=='-' ? -1 : 1);
+    }
+    int32_t e=validate(&t);
+    if (e) return e;
+    *utc=(uint64_t)((int64_t)to_tick(&t)-offset);
+    return 0;
+}
 
 static const RuntimeExport exports[]={
     {"sceRtcGetCurrentClockLocalTime",rtc_current_local}, {"sceRtcGetCurrentClock",rtc_current_clock},
@@ -151,5 +197,7 @@ static const RuntimeExport exports[]={
     {"sceRtcGetDayOfWeek",rtc_day_of_week}, {"sceRtcGetTick",rtc_get_tick}, {"sceRtcSetTick",rtc_set_tick},
     {"sceRtcGetTickResolution",rtc_tick_resolution}, {"sceRtcSetTime_t",rtc_set_time_t},
     {"sceRtcGetTime_t",rtc_get_time_t}, {"sceRtcFormatRFC2822LocalTime",rtc_rfc2822_local},
+    {"sceRtcFormatRFC2822",rtc_rfc2822}, {"sceRtcTickAddSeconds",rtc_add_seconds},
+    {"sceRtcParseDateTime",rtc_parse_date_time},
 };
 uintptr_t runtime_rtc_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

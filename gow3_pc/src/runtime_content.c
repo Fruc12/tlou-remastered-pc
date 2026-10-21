@@ -87,7 +87,22 @@ static ABI int32_t download_space(const char *mount,uint64_t *kb) {
     printf("Runtime: AppContent available space for %s = %llu KiB\n",mount,(unsigned long long)available);
     return 0;
 }
+/* No add-on is installed (addon_list lists none): mounting or downloading one finds nothing. */
+#define ADDCONT_NOT_FOUND ((int32_t)0x80d90005)
+static ABI int32_t addon_mount(uint32_t service,const void *label,char *mount) {
+    require_initialized();
+    (void)service;
+    if (!label || !mount) return PARAMETER;
+    return ADDCONT_NOT_FOUND;
+}
+static ABI int32_t addon_download(uint32_t service,const void *label) {
+    require_initialized();
+    (void)service;
+    return label ? ADDCONT_NOT_FOUND : PARAMETER;
+}
 uintptr_t runtime_content_resolve(const char *name) {
+    if (!strcmp(name,"VANhIWcqYak#libSceAppContent")) return (uintptr_t)addon_mount;
+    if (!strcmp(name,"7gxh+5QubhY#libSceAppContent")) return (uintptr_t)addon_download;
     if (!strcmp(name,"g8cM39EUZ6o#libSceSysmodule")) return (uintptr_t)module_load;
     if (!strcmp(name,"fMP5NHUOaMk#libSceSysmodule")) return (uintptr_t)module_loaded;
     if (!strcmp(name,"eR2bZFAAU0Q#libSceSysmodule")) return (uintptr_t)module_unload;

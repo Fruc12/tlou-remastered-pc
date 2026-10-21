@@ -254,8 +254,14 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
 // game's later CPU writes into the per-frame ring need no download. Before 15 Oct the count
 // ignored s6 (elements past it were overwritten) and only 2d215c3b was handled.
 // GOW3_SCALAR_COPY_GPU=1 keeps the GPU copy.
+// The Last of Us Remastered compiles the same two shaders as cs 3f8bac22 (one dword per
+// workgroup) and cs 82c46b8b (64). Its skinned meshes (the title screen's ivy, Sarah's blanket)
+// read their normal matrix from a block 3f8bac22 copies: done on the GPU, the walker read zeros,
+// the normals came out NaN and those surfaces were drawn flat, without lighting (21 Oct 2026).
 static constexpr u64 SCALAR_COPY_SHADER_HASH = 0x2d215c3b;
 static constexpr u64 SCALAR_COPY64_SHADER_HASH = 0x6a6422a9;
+static constexpr u64 TLOU_SCALAR_COPY_SHADER_HASH = 0x3f8bac22;
+static constexpr u64 TLOU_SCALAR_COPY64_SHADER_HASH = 0x82c46b8b;
 
 // gow3 diagnostics (GOW3_SCALAR_COPY_CHECK=1): each CPU scalar copy keeps what it read; at the
 // next submission, and at the one after, its source is read again. A source that changed in
@@ -500,8 +506,10 @@ bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
     case COPY_SHADER_HASH:
         return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
     case SCALAR_COPY_SHADER_HASH:
+    case TLOU_SCALAR_COPY_SHADER_HASH:
         return ExecuteScalarCopyHLE(info, cs_program, rasterizer, 1);
     case SCALAR_COPY64_SHADER_HASH:
+    case TLOU_SCALAR_COPY64_SHADER_HASH:
         return ExecuteScalarCopyHLE(info, cs_program, rasterizer, 64);
     default:
         return false;

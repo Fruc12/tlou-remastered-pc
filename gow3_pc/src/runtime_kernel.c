@@ -222,6 +222,31 @@ static ABI int32_t kernel_gettimeofday(GuestTimeval *tv) {
     return posix_gettimeofday(tv,NULL);
 }
 static ABI int64_t posix_time(int64_t *out) { int64_t t=(int64_t)time(NULL); if (out) *out=t; return t; }
+static int32_t utc_offset_seconds(time_t at) {
+#ifdef _WIN32
+    return (int32_t)compat_utc_offset(at);
+#else
+    struct tm local; localtime_r(&at,&local); return (int32_t)local.tm_gmtoff;
+#endif
+}
+/* OrbisTimesec: the UTC time, the local offset east of UTC and the summer time part (seconds);
+ * the host offset already includes summer time. */
+typedef struct { int64_t t; uint32_t west_sec, dst_sec; } GuestTimesec;
+static ABI int32_t utc_to_localtime(int64_t utc,int64_t *local,GuestTimesec *st,uint64_t *dst_sec) {
+    int32_t offset=utc_offset_seconds((time_t)utc);
+    if (local) *local=utc+offset;
+    if (st) { st->t=utc; st->west_sec=(uint32_t)offset; st->dst_sec=0; }
+    if (dst_sec) *dst_sec=0;
+    return 0;
+}
+static ABI int32_t localtime_to_utc(int64_t local,int64_t unused,int64_t *utc,GuestTimezone *tz,int32_t *dst_sec) {
+    (void)unused;
+    if (!tz) return ERR(22);
+    kernel_gettimezone(tz);
+    if (utc) *utc=local+(int64_t)tz->minuteswest*60;
+    if (dst_sec) *dst_sec=0;
+    return 0;
+}
 
 /* ---- process ---- */
 static ABI int32_t get_pagesize(void) { return PAGE; }
@@ -255,6 +280,62 @@ static ABI int32_t module_info_from_addr(uint64_t address,int32_t flags,void *in
     return ERR(3); /* ESRCH: the runtime keeps no module records */
 }
 static ABI int32_t kernel_mlock(const void *address,uint64_t size) { (void)address; (void)size; return 0; }
+/* The prepared image (the game and its linked libc/Fios2) is one module, handle 0. */
+static unsigned char *main_base;
+static uint64_t main_segments[4][3];
+static uint32_t main_segment_count;
+void runtime_set_main_module(unsigned char *base,const uint64_t (*segments)[3],uint64_t count) {
+    main_base=base; main_segment_count=0;
+    /* Code first, then data; at most 4 segments (SCE_DBG_MAX_SEGMENTS). */
+    for (int data=0;data<2;++data)
+        for (uint64_t i=0;i<count && main_segment_count<4;++i)
+            if ((segments[i][2]&1)!=(uint64_t)!data) memcpy(main_segments[main_segment_count++],segments[i],sizeof(segments[i]));
+}
+typedef struct { uint64_t address; uint32_t size; int32_t prot; } GuestSegmentInfo;
+typedef struct { uint64_t size; char name[256]; GuestSegmentInfo segments[4]; uint32_t segment_count; uint8_t fingerprint[20]; } GuestModuleInfo;
+_Static_assert(sizeof(GuestModuleInfo)==352,"OrbisKernelModuleInfo layout");
+static ABI int32_t module_list(int32_t *handles,uint64_t capacity,uint64_t *count) {
+    if (!handles || !count) return ERR(14);
+    if (!capacity) return ERR(12);
+    handles[0]=0; *count=1; return 0;
+}
+static ABI int32_t module_info(int32_t handle,GuestModuleInfo *info) {
+    if (!info) return ERR(14);
+    if (info->size<sizeof(*info)) return ERR(22);
+    if (handle || !main_base) return ERR(3);
+    memset(info->name,0,sizeof(*info)-sizeof(info->size));
+    strcpy(info->name,"eboot.bin");
+    for (uint32_t i=0;i<main_segment_count;++i) {
+        uint64_t flags=main_segments[i][2];
+        info->segments[i].address=(uint64_t)(uintptr_t)(main_base+main_segments[i][0]);
+        info->segments[i].size=(uint32_t)main_segments[i][1];
+        /* ELF PF_X/W/R to SCE_KERNEL_PROT_CPU_READ 1, WRITE 2, EXEC 4. */
+        info->segments[i].prot=(flags&4 ? 1 : 0)|(flags&2 ? 2 : 0)|(flags&1 ? 4 : 0);
+    }
+    info->segment_count=main_segment_count;
+    return 0;
+}
+/* No unwind tables are recorded (see module_info_from_addr). */
+static ABI int32_t module_info_for_unwind(uint64_t address,int32_t flags,void *info) {
+    return module_info_from_addr(address,flags,info);
+}
+static ABI int32_t module_segment_info(void *info) { (void)info; return ERR(3); }
+static ABI int32_t kernel_dlsym(int32_t handle,const char *symbol,void **address) {
+    printf("Runtime: sceKernelDlsym(%d, %s): no symbol table at run time\n",handle,symbol ? symbol : "(null)");
+    if (address) *address=NULL;
+    return ERR(3);
+}
+/* Every module the game needs is linked before it starts; others (e.g. system debug modules)
+ * are reported missing. */
+static ABI int32_t load_start_module(const char *path,uint64_t args,const void *argp,uint32_t flags,const void *opt,int32_t *result) {
+    (void)args; (void)argp; (void)flags; (void)opt;
+    printf("Runtime: sceKernelLoadStartModule(%s): not available\n",path ? path : "(null)");
+    if (result) *result=0;
+    return ERR(2);
+}
+/* The base PS4 (not PS4 Pro); GOW3_NEO_MODE=1 reports a PS4 Pro. */
+static ABI int32_t is_neo_mode(void) { const char *v=getenv("GOW3_NEO_MODE"); return v && *v=='1'; }
+static ABI int32_t kernel_sync(void) { return 0; }
 /* libc's C++ exception unwinder. The game does not throw (no __cxa_throw import): unwinding
  * finds no frame data, and resuming a context is a stop, never a silent success. */
 static ABI int32_t elf_phdr_match_addr(void *info,uint64_t address) { (void)info; (void)address; return 0; }
@@ -410,6 +491,12 @@ static const RuntimeExport exports[]={
     {"sceKernelPrintBacktraceWithModuleInfo",print_backtrace},
     {"getargc",get_argc}, {"getargv",get_argv}, {"sceKernelStopUnloadModule",stop_unload_module},
     {"sceKernelGetModuleInfoFromAddr",module_info_from_addr}, {"sceKernelMlock",kernel_mlock},
+    {"sceKernelGetModuleList",module_list}, {"sceKernelGetModuleInfo",module_info},
+    {"sceKernelGetModuleInfoForUnwind",module_info_for_unwind},
+    {"sceKernelInternalMemoryGetModuleSegmentInfo",module_segment_info},
+    {"sceKernelDlsym",kernel_dlsym}, {"sceKernelLoadStartModule",load_start_module},
+    {"sceKernelIsNeoMode",is_neo_mode}, {"sceKernelSync",kernel_sync},
+    {"sceKernelConvertUtcToLocaltime",utc_to_localtime}, {"sceKernelConvertLocaltimeToUtc",localtime_to_utc},
     {"__elf_phdr_match_addr",elf_phdr_match_addr}, {"_is_signal_return",is_signal_return},
     {"__pthread_cxa_finalize",pthread_cxa_finalize}, {"sigreturn",unwind_resume},
     {"__Ux86_64_setcontext",unwind_resume},

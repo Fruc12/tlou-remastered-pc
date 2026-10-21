@@ -941,6 +941,30 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const Vulkan::GpuWriteSite site{4};
     const auto* dma_data = reinterpret_cast<const PM4DmaData*>(data);
     ASSERT(dma_data->command.das == 0);
+    // Diagnostics (GOW3_TRACE_WRITERS=<lo>:<hi>, as in Rasterizer::BindBuffers): DMA packets
+    // writing into the range, 100 at most.
+    if (dma_data->dst_sel == DmaDataDst::Memory || dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
+        static const std::pair<VAddr, VAddr> range = [] {
+            const char* env = std::getenv("GOW3_TRACE_WRITERS");
+            if (!env) return std::pair<VAddr, VAddr>{0, 0};
+            char* end = nullptr;
+            const VAddr lo = std::strtoull(env, &end, 16);
+            const VAddr hi = end && *end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0;
+            return std::pair<VAddr, VAddr>{lo, hi};
+        }();
+        static std::atomic<int> traced{0};
+        const VAddr dst = dma_data->DstAddress<VAddr>();
+        if (range.second > range.first && dst < range.second &&
+            dst + dma_data->NumBytes() > range.first && traced.fetch_add(1) < 100) {
+            std::printf("Writer trace: DMA %s %#llx -> %#llx size %u\n",
+                        dma_data->src_sel == DmaDataSrc::Data ? "fill" : "copy",
+                        static_cast<unsigned long long>(dma_data->src_sel == DmaDataSrc::Data
+                                                            ? dma_data->data
+                                                            : dma_data->SrcAddress<VAddr>()),
+                        static_cast<unsigned long long>(dst), dma_data->NumBytes());
+            std::fflush(stdout);
+        }
+    }
     // A copy or fill into guest memory can be made there at once (CopyBuffer/FillBuffer's CPU
     // paths): like WriteData, not before the copies and fences deferred to the recording thread.
     // Uncharted 2 with multithreaded rendering: a DMA-written frame marker overtook the deferred
@@ -1492,6 +1516,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     if (dcb_stats) {
         ScanDcb(dcb, dcb_depth);
     }
+    // Diagnostics (GOW3_DCB_SNAPSHOT=1): a copy of each top-level buffer as its processing starts,
+    // decoded when an invalid packet is found (was the buffer rewritten while it was processed?).
+    static const bool dcb_snapshot = EmulatorSettingsImpl::Flag("GOW3_DCB_SNAPSHOT", false);
+    std::vector<u32> snapshot;
+    if (dcb_snapshot && dcb_depth == 0) {
+        snapshot.assign(dcb.begin(), dcb.end());
+    }
 
     cblock.Reset();
 
@@ -1506,9 +1537,32 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     }
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
+    // The rest of a buffer is copied before its first packet that can tell the guest the GPU got
+    // this far (fences, memory writes): the guest may then clear or rewrite the buffer, which a
+    // PS4 GPU had long fetched. The Last of Us Remastered clears its frame-end buffer as soon as
+    // its end-of-pipe fences are written, while the trailing NOP was still being read here.
+    // GOW3_DCB_COPY_ON_SIGNAL=0 reads the guest's memory throughout.
+    static const bool copy_on_signal = [] {
+        const char* env = std::getenv("GOW3_DCB_COPY_ON_SIGNAL");
+        return !env || env[0] != '0';
+    }();
+    std::vector<u32> remainder;
     while (!dcb.empty()) {
         ProcessCommands();
 
+        if (copy_on_signal && remainder.empty() && (dcb[0] >> 30) == 3) {
+            switch (static_cast<PM4ItOpcode>((dcb[0] >> 8) & 0xff)) {
+            case PM4ItOpcode::WriteData:
+            case PM4ItOpcode::EventWriteEop:
+            case PM4ItOpcode::EventWriteEos:
+            case PM4ItOpcode::ReleaseMem:
+                remainder.assign(dcb.begin(), dcb.end());
+                dcb = remainder;
+                break;
+            default:
+                break;
+            }
+        }
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
 
@@ -1540,6 +1594,31 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 std::printf(" %08x", dcb[i]);
             }
             std::printf("\n");
+            if (!snapshot.empty()) {
+                const size_t error_at = (at - base_addr) / 4;
+                std::printf("  as it was when processing started (%zu dwords):\n", snapshot.size());
+                for (size_t i = 0; i < snapshot.size() && i <= error_at + 8;) {
+                    const u32 word = snapshot[i];
+                    const size_t words = (word >> 30) == 3 ? ((word >> 16) & 0x3fff) + 2 : 1;
+                    std::printf("    +%#06zx %08x type %u", i * 4, word, word >> 30);
+                    if ((word >> 30) == 3) {
+                        std::printf(" opcode %#04x, %zu dwords:", (word >> 8) & 0xff, words);
+                    }
+                    for (size_t k = 1; k < words && k < 6 && i + k < snapshot.size(); ++k) {
+                        std::printf(" %08x", snapshot[i + k]);
+                    }
+                    std::printf("\n");
+                    i += words;
+                }
+                size_t changed = 0;
+                for (size_t i = 0; i < snapshot.size(); ++i) {
+                    if (snapshot[i] != words[i] && changed++ < 12) {
+                        std::printf("  changed +%#06zx: %08x -> %08x\n", i * 4, snapshot[i], words[i]);
+                    }
+                }
+                std::printf("  %zu of %zu dwords changed since processing started\n", changed,
+                            snapshot.size());
+            }
             std::fflush(stdout);
             UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
                             header->type0.base.Value(), header->type0.NumWords());

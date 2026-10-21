@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <set>
+#include <tuple>
 #include <bit>
 #include <atomic>
 #include <cmath>
@@ -1348,9 +1350,11 @@ int SrtPendingDrain() {
 }
 
 /// The copy shaders stage B runs whose destinations the next draws' resource tables read: the
-/// scalar copies 2d215c3b / 6a6422a9 and the copy shader fefebf9f (vk_shader_hle.cpp).
+/// scalar copies 2d215c3b / 6a6422a9 (The Last of Us: 3f8bac22 / 82c46b8b) and the copy shader
+/// fefebf9f (vk_shader_hle.cpp).
 bool IsTableCopyShader(u64 hash) {
-    return hash == 0x2d215c3b || hash == 0x6a6422a9 || hash == 0xfefebf9f;
+    return hash == 0x2d215c3b || hash == 0x6a6422a9 || hash == 0x3f8bac22 || hash == 0x82c46b8b ||
+           hash == 0xfefebf9f;
 }
 } // namespace
 
@@ -3552,6 +3556,8 @@ void Rasterizer::ResolveSrtTables(const SrtPlan& plan, const Shader::Info& info,
     }
 }
 
+static bool TracedShader(u64 hash);
+
 void Rasterizer::SyncSrtTables(const Shader::Info& info) {
     const auto& srt = info.srt_info;
     if (!srt.walker_func || !srt.walker_func_size || !OnStageA() ||
@@ -3653,13 +3659,50 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
                 }
             }
         }
+        // Diagnostics (GOW3_TRACE_PS): the tables a traced shader's walk reads, as the walk will
+        // see them (after any download below), 64 lines at most.
+        const auto trace_table = [&](bool gpu_written) {
+            if (!TracedShader(info.pgm_hash) || !table || !node.extent || !IsMapped(table, node.extent)) {
+                return;
+            }
+            static std::atomic<int> traced{0};
+            if (traced.fetch_add(1) >= 64) {
+                return;
+            }
+            std::string text = fmt::format(
+                "SRT trace: shader {:08x} node {} (level {}, at +{:#x}) table {:#x} +{} bytes{}:",
+                info.pgm_hash, i, node.parent < 0 ? 1 : 2, node.offset, table, node.extent,
+                gpu_written ? ", GPU-written, downloaded" : "");
+            const auto* words = reinterpret_cast<const u32*>(table);
+            for (u32 w = 0; w < std::min<u32>(node.extent / 4, 28); ++w) {
+                text += fmt::format(" {:08x}", words[w]);
+            }
+            std::printf("%s\n", text.c_str());
+            std::fflush(stdout);
+            // GOW3_TRACE_WATCH_NODE=<node>:<byte offset> (needs GOW3_EXEC_WATCH, e.g. w:0): the
+            // CPU data watch follows that table word, to find the guest code that writes it.
+            static const std::pair<int, u32> watch_node = [] {
+                const char* env = std::getenv("GOW3_TRACE_WATCH_NODE");
+                if (!env) return std::pair<int, u32>{-1, 0};
+                char* end = nullptr;
+                const int n = int(std::strtol(env, &end, 10));
+                return std::pair<int, u32>{n, end && *end == ':' ? u32(std::strtoul(end + 1, nullptr, 16)) : 0};
+            }();
+            static VAddr watched = 0;
+            if (int(i) == watch_node.first && table + watch_node.second != watched) {
+                watched = table + watch_node.second;
+                runtime_exec_watch_retarget(watched);
+            }
+        };
         if (!table || !node.extent || !buffer_cache.IsRangeGpuWrittenShared(table, node.extent) ||
             !IsMapped(table, node.extent)) {
+            trace_table(false);
             continue;
         }
         DrainDrawPipe();
         const std::pair<VAddr, u64> range{table, node.extent};
         buffer_cache.DownloadRanges(std::span{&range, 1});
+        trace_table(true);
         ++srt_syncs;
         if (srt_sync_reports < 16) {
             ++srt_sync_reports;
@@ -4782,11 +4825,44 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                  vsharp.GetSize(), false);
             }
         }
+        // Diagnostics (GOW3_TRACE_WRITERS=<lo>:<hi>, hex guest addresses): shaders that bind a
+        // written buffer overlapping the range, each shader, slot and address once (who writes it?).
+        if (desc.is_written && !desc.IsSpecial() && !ring) {
+            static const std::pair<VAddr, VAddr> writers_range = [] {
+                const char* env = std::getenv("GOW3_TRACE_WRITERS");
+                if (!env) return std::pair<VAddr, VAddr>{0, 0};
+                char* end = nullptr;
+                const VAddr lo = std::strtoull(env, &end, 16);
+                const VAddr hi = end && *end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0;
+                return std::pair<VAddr, VAddr>{lo, hi};
+            }();
+            if (writers_range.second > writers_range.first) {
+                const auto vsharp = prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
+                const VAddr address = vsharp.base_address;
+                const u64 size = vsharp.GetSize();
+                if (address < writers_range.second && address + size > writers_range.first) {
+                    static std::mutex writers_mutex;
+                    static std::set<std::tuple<u64, u32, VAddr>> writers_seen;
+                    std::scoped_lock lk{writers_mutex};
+                    if (writers_seen.size() < 200 && writers_seen.emplace(stage.pgm_hash, buffer_index, address).second) {
+                        std::printf("Writer trace: %s shader %08llx slot %u writes %#llx size %llu (format %u/%u, "
+                                    "stride %u)\n",
+                                    compute_stage ? "compute" : "graphics",
+                                    static_cast<unsigned long long>(stage.pgm_hash), buffer_index,
+                                    static_cast<unsigned long long>(address),
+                                    static_cast<unsigned long long>(size), u32(vsharp.GetDataFmt()),
+                                    u32(vsharp.GetNumberFmt()), u32(vsharp.GetStride()));
+                        std::fflush(stdout);
+                    }
+                }
+            }
+        }
         if (TracedShader(stage.pgm_hash) && !desc.IsSpecial()) {
             static std::atomic<int> traced{0};
             if (traced.fetch_add(1) < 40) {
                 VAddr address = 0;
                 u64 size = 0;
+                std::string sharp_text;
                 if (ring) {
                     address = ring->address;
                     size = ring->size;
@@ -4794,15 +4870,21 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     const auto vsharp = prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
                     address = vsharp.base_address;
                     size = vsharp.GetSize();
+                    sharp_text = fmt::format(" (format {}/{}, stride {}, records {}, swizzle {}{}{}{})",
+                                             u32(vsharp.GetDataFmt()), u32(vsharp.GetNumberFmt()),
+                                             u32(vsharp.GetStride()), u32(vsharp.num_records),
+                                             u32(vsharp.dst_sel_x), u32(vsharp.dst_sel_y),
+                                             u32(vsharp.dst_sel_z), u32(vsharp.dst_sel_w));
                 }
-                std::string text = fmt::format("PS trace buffer: shader {:08x} slot {} at {:#x} size {}{}:",
-                                               stage.pgm_hash, buffer_index, address, size, ring ? " (ring)" : "");
+                std::string text = fmt::format("PS trace buffer: shader {:08x} slot {} at {:#x} size {}{}{}:",
+                                               stage.pgm_hash, buffer_index, address, size, ring ? " (ring)" : "",
+                                               sharp_text);
                 if (address && memory->IsValidGpuMapping(address, 0)) {
                     float values[16]{};
                     memory->CopySparseMemory(address, reinterpret_cast<u8*>(values),
                                              std::min<u64>(size, sizeof(values)));
                     for (u32 i = 0; i < std::min<u64>(size / 4, 16); ++i) {
-                        text += fmt::format(" {}", values[i]);
+                        text += fmt::format(" {:08x}", std::bit_cast<u32>(values[i]));
                     }
                 }
                 std::printf("%s\n", text.c_str());
@@ -5844,9 +5926,16 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             for (u32 cb = 0; cb < cb_descs.size(); ++cb) {
                 if (cb_descs[cb].first) {
                     const auto& image = texture_cache.GetImage(cb_descs[cb].first);
-                    text += fmt::format("; rt{} {:#x} {}x{} {}", cb, image.info.guest_address,
-                                        image.info.size.width, image.info.size.height,
-                                        vk::to_string(image.info.pixel_format));
+                    const auto& col_buf = regs.color_buffers[cb];
+                    const auto& blend = regs.blend_control[cb];
+                    text += fmt::format("; rt{} {:#x} {}x{} {} levels {} (register {:#x} pitch {} "
+                                        "height {}, view mip {}, blend {} src {} dst {} func {})",
+                                        cb, image.info.guest_address, image.info.size.width,
+                                        image.info.size.height, vk::to_string(image.info.pixel_format),
+                                        image.info.resources.levels, col_buf.Address(), col_buf.Pitch(),
+                                        col_buf.Height(), cb_descs[cb].second.view_info.range.base.level,
+                                        u32(blend.enable), u32(blend.color_src_factor),
+                                        u32(blend.color_dst_factor), u32(blend.color_func));
                 }
             }
             if (db_desc.first) {

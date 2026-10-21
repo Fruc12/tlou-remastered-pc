@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <set>
+#include <tuple>
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
@@ -928,6 +930,34 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             }
         }
 
+        // Diagnostics (GOW3_TRACE_SUBRESOURCES=1): a render target inside another image's mip
+        // chain that is not taken for one of its levels (40 lines at most).
+        static const bool trace_subresources = [] {
+            const char* env = std::getenv("GOW3_TRACE_SUBRESOURCES");
+            return env && env[0] == '1';
+        }();
+        if (trace_subresources && binding == BindingType::RenderTarget &&
+            cache_image.info.resources.levels > 1) {
+            static std::atomic<int> lines{0};
+            if (lines.fetch_add(1, std::memory_order_relaxed) < 40) {
+                const auto& c = cache_image.info;
+                std::printf("Subresource miss: target %#llx %ux%u pitch %u tile %u array %u bits %u "
+                            "levels %u in image %#llx %ux%u pitch %u tile %u array %u levels %u "
+                            "(compatible %d)\n",
+                            static_cast<unsigned long long>(image_info.guest_address),
+                            image_info.size.width, image_info.size.height, image_info.pitch,
+                            u32(image_info.tile_mode), u32(image_info.array_mode), image_info.num_bits,
+                            image_info.resources.levels, static_cast<unsigned long long>(c.guest_address),
+                            c.size.width, c.size.height, c.pitch, u32(c.tile_mode), u32(c.array_mode),
+                            c.resources.levels, int(image_info.IsCompatible(c)));
+                for (u32 m = 0; m < c.resources.levels && m < 8; ++m) {
+                    std::printf("  level %u at %#llx size %#x pitch %u height %u\n", m,
+                                static_cast<unsigned long long>(c.guest_address + c.mips_layout[m].offset),
+                                c.mips_layout[m].size, c.mips_layout[m].pitch, c.mips_layout[m].height);
+                }
+                std::fflush(stdout);
+            }
+        }
         // Image isn't a subresource but a chance overlap.
         if (safe_to_delete) {
             FreeImage(cache_image_id);
@@ -987,6 +1017,32 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     ASSERT(info.guest_address != 0);
 
     std::scoped_lock lock{mutex};
+    // Diagnostics (GOW3_TRACE_FIND_IMAGE=<lo>:<hi>, hex): lookups of images starting in the range,
+    // whether the lookup cache answered and what was found, each distinct result once (300 at most).
+    static const std::pair<VAddr, VAddr> trace_range = [] {
+        const char* env = std::getenv("GOW3_TRACE_FIND_IMAGE");
+        if (!env) return std::pair<VAddr, VAddr>{0, 0};
+        char* end = nullptr;
+        const VAddr lo = std::strtoull(env, &end, 16);
+        return std::pair<VAddr, VAddr>{lo, end && *end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0};
+    }();
+    const bool trace_find = info.guest_address >= trace_range.first && info.guest_address < trace_range.second;
+    const auto note_find = [&](const char* how, ImageId found, int mip) {
+        static std::set<std::tuple<VAddr, u32, u32, u32, int, char>> seen;
+        const Image& image = slot_images[found];
+        if (seen.size() < 300 && seen.emplace(info.guest_address, u32(desc.type), info.size.width,
+                                              found.index, mip, how[0]).second) {
+            std::printf("Find image %s: %#llx %ux%u levels %u binding %u -> image %u %#llx %ux%u levels %u "
+                        "size %#llx view mip %d (generation %llu)\n",
+                        how, static_cast<unsigned long long>(info.guest_address), info.size.width,
+                        info.size.height, info.resources.levels, u32(desc.type), found.index,
+                        static_cast<unsigned long long>(image.info.guest_address), image.info.size.width,
+                        image.info.size.height, image.info.resources.levels,
+                        static_cast<unsigned long long>(image.info.guest_size), mip,
+                        static_cast<unsigned long long>(registry_generation.load()));
+            std::fflush(stdout);
+        }
+    };
 
     u64 key_hash = info.guest_address ^ info.guest_size << 17 ^ u64(info.pixel_format) << 40 ^
                    u64(info.size.width) << 24 ^ info.size.height ^ u64(desc.type) << 58 ^
@@ -1022,6 +1078,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         }
         if (cached.view_slice > 0) {
             desc.view_info.range.base.layer = cached.view_slice;
+        }
+        if (trace_find) {
+            note_find("cached", cached.image_id, cached.view_mip);
         }
         return cached.image_id;
     }
@@ -1059,16 +1118,22 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     int view_slice{-1};
     if (!image_id) {
         for (const auto& cache_id : image_ids) {
-            view_mip = -1;
-            view_slice = -1;
-
             const auto& merged_info = image_id ? slot_images[image_id].info : info;
             auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
                 ResolveOverlap(merged_info, desc.type, cache_id, image_id);
             if (overlap_image_id) {
+                // gow3 21 Oct 2026: once the request is a level or slice of an image, a later image
+                // of the region is resolved against that whole image (merged_info): it confirms or
+                // merges it, and its answer has no view of the request. The view was dropped when
+                // that later image, or one resolving to nothing, came after it (the views were reset
+                // at every image). The Last of Us Remastered's bloom chain then drew levels 1 and 2
+                // into level 0, and the scene sampled level 2 as the main menu had left it: a
+                // blurred menu window over Sarah's bedroom after loading.
+                if (!image_id || overlap_view_mip >= 0 || overlap_view_slice >= 0) {
+                    view_mip = overlap_view_mip;
+                    view_slice = overlap_view_slice;
+                }
                 image_id = overlap_image_id;
-                view_mip = overlap_view_mip;
-                view_slice = overlap_view_slice;
             }
         }
     }
@@ -1137,6 +1202,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         .view_mip = view_mip,
         .view_slice = view_slice,
     };
+    if (trace_find) {
+        note_find("resolved", image_id, view_mip);
+    }
     return image_id;
 }
 

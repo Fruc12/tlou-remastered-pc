@@ -526,7 +526,14 @@ static int direct_range_allocated(uint64_t phys, uint64_t size) {
     return 1;
 }
 
-static ABI uint64_t direct_size(void) { return POOL_SIZE; }
+/* The size the game is told; GOW3_DMEM_REPORT_MB sets it below the pool. The Last of Us
+ * Remastered expects a retail console's 4608 MiB and takes any other size for a development kit
+ * (it then reserves a 768 MiB "Game Debug" area that does not fit). */
+static ABI uint64_t direct_size(void) {
+    const char *env = getenv("GOW3_DMEM_REPORT_MB");
+    uint64_t mb = env ? strtoull(env, NULL, 10) : 0;
+    return mb && mb * 1024 * 1024 <= POOL_SIZE ? mb * 1024 * 1024 : POOL_SIZE;
+}
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {
     if (!alignment) alignment = PAGE;

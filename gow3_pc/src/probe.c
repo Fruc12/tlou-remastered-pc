@@ -1261,6 +1261,8 @@ int main(int argc, char **argv) {
         runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
         runtime_thread_attach_main();
         runtime_set_procparam(image+procparam);
+        _Static_assert(sizeof(Segment)==3*sizeof(uint64_t),"Segment is address, size, flags");
+        runtime_set_main_module(image,(const uint64_t (*)[3])segments,ns);
         /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
         for (uint64_t m=0;m<module_count;++m) {
             printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);

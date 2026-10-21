@@ -228,7 +228,16 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
         return -1;
     }
 
-    if (info.array_mode != array_mode) {
+    // gow3 21 Oct 2026: GCN stores the levels of a macro-tiled (2D) image that are too small for
+    // a macro tile with 1D tiling of the same micro tile mode, and a render target on such a
+    // level says so. The Last of Us Remastered draws its bloom and glare chains level by level
+    // (128x128 2D thin, then 64x64 and below 1D thin): each level became an image of its own and
+    // the chain it samples kept stale levels (a bright haze over the bedroom after loading).
+    const bool degraded_level = AmdGpu::IsMacroTiled(info.array_mode) &&
+                                array_mode == AmdGpu::ArrayMode::Array1DTiledThin1 &&
+                                AmdGpu::GetMicroTileMode(tile_mode) ==
+                                    AmdGpu::GetMicroTileMode(info.tile_mode);
+    if (info.array_mode != array_mode && !degraded_level) {
         return -1;
     }
 
@@ -255,7 +264,7 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
         }
     }
 
-    if (mip < 0) {
+    if (mip < 0 || (mip == 0 && info.array_mode != array_mode)) {
         return -1;
     }
 

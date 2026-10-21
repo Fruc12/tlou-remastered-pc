@@ -657,6 +657,11 @@ static ABI int64_t posix_unlink(const char *p) { return posix(path_op(p,2,0)); }
 static ABI int32_t sce_check_reachability(const char *p) {
     GuestStat s; return (int32_t)sce(do_stat(p,&s));
 }
+/* Access/modification times: the file must exist; its host times are left as they are. */
+static ABI int32_t sce_utimes(const char *p,const void *times) {
+    (void)times;
+    GuestStat s; return (int32_t)sce(do_stat(p,&s));
+}
 
 static const RuntimeExport exports[]={
     {"sceKernelOpen",sce_open}, {"open",posix_open}, {"_open",posix_open},
@@ -674,6 +679,7 @@ static const RuntimeExport exports[]={
     {"sceKernelTruncate",sce_truncate}, {"truncate",posix_truncate},
     {"sceKernelFsync",sce_fsync}, {"fsync",posix_fsync},
     {"access",posix_access}, {"sceKernelCheckReachability",sce_check_reachability},
+    {"sceKernelUtimes",sce_utimes},
     {"sceKernelMkdir",sce_mkdir}, {"mkdir",posix_mkdir},
     {"sceKernelRmdir",sce_rmdir}, {"rmdir",posix_rmdir},
     {"sceKernelUnlink",sce_unlink}, {"unlink",posix_unlink},

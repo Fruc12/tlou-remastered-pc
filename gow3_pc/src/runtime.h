@@ -34,6 +34,9 @@ void runtime_rwlock_report(void);
 void runtime_set_libc_tls(const void *data, uint64_t filesz, uint64_t memsz);
 void runtime_set_module_tls(uint64_t module, const void *data, uint64_t filesz, uint64_t memsz);
 void runtime_set_procparam(void *param);
+/* The loaded image as one module (handle 0) for sceKernelGetModuleInfo/List: its segments are
+ * address, size, PS4 protection flags (1 x, 2 w, 4 r) relative to base. */
+void runtime_set_main_module(unsigned char *base, const uint64_t (*segments)[3], uint64_t count);
 void **runtime_application_heap_api(void);
 uintptr_t runtime_thread_resolve(const char *name);
 void runtime_thread_report(void);

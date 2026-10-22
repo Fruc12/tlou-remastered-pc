@@ -640,6 +640,8 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                         PrepareVertexInputs(*vs, *sel.fetch_shader, *regs, draw.vertex, arena);
                     }
                     draw.state.store(PreparedDraw::Ready, std::memory_order_release);
+                    // GOW3_PREFETCH_PIPELINES: a pipeline not built yet starts building now.
+                    pipeline_cache.PrefetchGraphicsPipeline(sel);
                 } else {
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
                 }

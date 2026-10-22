@@ -80,6 +80,7 @@ struct AsyncGraphicsCompilation {
     GraphicsPipeline::SerializationSupport data;
     std::unique_ptr<GraphicsPipeline> pipeline;
     bool failure_logged = false;
+    bool prefetch = false; ///< requested by a draw-preparation worker (GOW3_PREFETCH_PIPELINES)
 };
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
@@ -637,6 +638,9 @@ void PipelineCache::PublishGraphics(bool wait) {
                 build->failure_logged = true;
             }
             if (build->job.Failed()) {
+                if (build->prefetch) {
+                    prefetch_stats[6].fetch_add(1, std::memory_order_relaxed);
+                }
                 // gow3: kept out of pending_graphics (so it can become empty) and never queued
                 // again, as when it stayed there; a synchronous draw compiles it itself.
                 failed_graphics.emplace(it.key(), std::move(build));
@@ -647,6 +651,9 @@ void PipelineCache::PublishGraphics(bool wait) {
             continue;
         }
         const auto key = it.key();
+        if (build->prefetch) {
+            prefetch_stats[2].fetch_add(1, std::memory_order_relaxed);
+        }
         build->pipeline->PublishStages(build->live_infos);
         RegisterPipelineData(key, std::hash<GraphicsPipelineKey>{}(key), build->data);
         graphics_pipelines.emplace(key, std::move(build->pipeline));
@@ -723,6 +730,18 @@ void PipelineCache::ReportCompilerStats() {
             std::printf("Compute precompile (5 s): %u queued, %u ready when needed, %u waited for "
                         "(%.1f ms), %u compiled by the GPU thread instead, %u failed\n",
                         queued, adopted, waited, precompile_wait_ns.exchange(0) / 1e6, taken, failed);
+        }
+        u32 p[7];
+        bool any = false;
+        for (u32 i = 0; i < 7; ++i) {
+            p[i] = prefetch_stats[i].exchange(0, std::memory_order_relaxed);
+            any |= p[i] != 0;
+        }
+        if (any) {
+            std::printf("Pipeline prefetch (5 s): %u requested, %u queued, %u built, %u waited for at "
+                        "the draw (%.1f ms); the GPU thread compiled %u with a prepared key, %u "
+                        "without; %u failed\n",
+                        p[0], p[1], p[2], p[3], prefetch_wait_ns.exchange(0) / 1e6, p[4], p[5], p[6]);
         }
     }
 }
@@ -1026,11 +1045,143 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     return it != graphics_pipelines.end() && !it->second->Failed() ? it->second.get() : nullptr;
 }
 
+namespace {
+// gow3 22 Oct 2026: GOW3_PREFETCH_PIPELINES=1 (PipelineCache::PrefetchGraphicsPipeline).
+bool PrefetchPipelines() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_PREFETCH_PIPELINES");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+} // namespace
+
+void PipelineCache::PrefetchGraphicsPipeline(const PipelineSelection& worker_sel) {
+    // Not before the GPU thread has seeded the compiler threads' pipeline caches (see
+    // PrecompileCompute).
+    if (!PrefetchPipelines() || !compiler || !worker_sel.worker ||
+        !std::atomic_ref<bool>{worker_caches_seeded}.load(std::memory_order_acquire)) {
+        return;
+    }
+    const u64 key_hash = std::hash<GraphicsPipelineKey>{}(worker_sel.graphics_key);
+    // Each worker asks the shared set once per key: most draws use pipelines it has seen.
+    thread_local std::unordered_set<u64> seen;
+    if (!seen.insert(key_hash).second) {
+        return;
+    }
+    {
+        std::scoped_lock lock{prefetch_mutex};
+        if (!prefetch_requested.insert(key_hash).second) {
+            return;
+        }
+    }
+    const auto drop = [&] {
+        std::scoped_lock lock{prefetch_mutex};
+        prefetch_requested.erase(key_hash);
+    };
+    const auto& worker = *worker_sel.worker;
+    auto build = std::make_shared<AsyncGraphicsCompilation>();
+    build->prefetch = true;
+    build->selection = worker_sel;
+    build->selection.regs = nullptr;
+    build->selection.worker = nullptr;
+    // The fetch shader and the vertex V#s are read from guest memory, which ahead of the GPU
+    // thread may already be reused: a fault drops the request (the GPU thread builds it then).
+    sigjmp_buf recover;
+    if (sigsetjmp(recover, 0)) {
+        runtime_fault_recover = nullptr;
+        drop();
+        return;
+    }
+    runtime_fault_recover = &recover;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        const auto* info = worker_sel.infos[i];
+        if (!info) {
+            continue;
+        }
+        // The published pipeline keeps the program's own Info, as one the GPU thread builds.
+        const Shader::Info* live = nullptr;
+        for (const auto& stage : worker.stages) {
+            const auto found = worker.infos.find(stage.program);
+            if (found != worker.infos.end() && &found->second == info) {
+                live = &stage.program->info;
+                break;
+            }
+        }
+        if (!live) {
+            runtime_fault_recover = nullptr;
+            drop();
+            return;
+        }
+        build->infos[i] = std::make_unique<Shader::Info>(*info);
+        build->user_data[i].assign(info->user_data.begin(), info->user_data.end());
+        build->infos[i]->user_data = build->user_data[i];
+        build->selection.infos[i] = build->infos[i].get();
+        build->fetch[i].Capture(*build->infos[i]);
+        build->live_infos[i] = live;
+    }
+    runtime_fault_recover = nullptr;
+    prefetch_stats[0].fetch_add(1, std::memory_order_relaxed);
+    std::scoped_lock lock{prefetch_mutex};
+    prefetch_inbox.push_back(std::move(build));
+    prefetch_inbox_size.store(static_cast<u32>(prefetch_inbox.size()), std::memory_order_release);
+}
+
+void PipelineCache::DrainPrefetch() {
+    if (prefetch_inbox_size.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    std::vector<std::shared_ptr<AsyncGraphicsCompilation>> requests;
+    {
+        std::scoped_lock lock{prefetch_mutex};
+        requests.swap(prefetch_inbox);
+        prefetch_inbox_size.store(0, std::memory_order_release);
+    }
+    for (size_t i = 0; i < requests.size(); ++i) {
+        auto& build = requests[i];
+        const auto& key = build->selection.graphics_key;
+        if (graphics_pipelines.contains(key) || pending_graphics.contains(key) ||
+            (!failed_graphics.empty() && failed_graphics.contains(key))) {
+            continue;
+        }
+        // Half the compiler queue at most (as PrecompileCompute): the rest waits for a later draw.
+        if (compiler->Depth() >= 32) {
+            std::scoped_lock lock{prefetch_mutex};
+            prefetch_inbox.insert(prefetch_inbox.end(), std::make_move_iterator(requests.begin() + i),
+                                  std::make_move_iterator(requests.end()));
+            prefetch_inbox_size.store(static_cast<u32>(prefetch_inbox.size()),
+                                      std::memory_order_release);
+            return;
+        }
+        const bool queued = build->job.Start(*compiler, [this, build] {
+            // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
+            Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
+            PhaseTimer compile{g_gow3_async_ns};
+            // An assertion on this guess throws (the build fails; the draw compiles it itself).
+            gow3_assert_throws = true;
+            struct Reset {
+                ~Reset() { gow3_assert_throws = false; }
+            } reset;
+            auto& s = build->selection;
+            build->pipeline = std::make_unique<GraphicsPipeline>(
+                instance, scheduler, desc_heap, profile, s.graphics_key,
+                *worker_pipeline_caches[AsyncCompiler::WorkerIndex()], s.infos, s.runtime_infos,
+                s.fetch_shader, s.modules, build->data, false);
+            return build;
+        });
+        if (queued) {
+            pending_graphics.emplace(key, build);
+            prefetch_stats[1].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
     SeedWorkerCaches();
     PublishShaders();
     PublishGraphics();
+    DrainPrefetch();
     PumpWarmUp();
     used_prepared = nullptr;
     if (prepared) {
@@ -1093,11 +1244,22 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         ++g_gow3_pending_draws;
         return nullptr;
     }
-    if (sync_compile) {
-        // Queued in the background earlier: waited for, not compiled twice.
+    if (sync_compile || !pending_graphics.empty()) {
+        // Queued in the background earlier (or by a worker's prefetch): waited for, not
+        // compiled twice.
         if (const auto pending = pending_graphics.find(sel.graphics_key);
             pending != pending_graphics.end()) {
+            const auto wait_started = std::chrono::steady_clock::now();
+            const bool prefetched = pending.value()->prefetch;
             pending.value()->job.Wait();
+            if (prefetched) {
+                prefetch_stats[3].fetch_add(1, std::memory_order_relaxed);
+                prefetch_wait_ns.fetch_add(
+                    u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - wait_started)
+                            .count()),
+                    std::memory_order_relaxed);
+            }
             PublishGraphics();
             if (const auto found = graphics_pipelines.find(sel.graphics_key);
                 found != graphics_pipelines.end()) {
@@ -1107,6 +1269,13 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     if (is_new) {
+        if (PrefetchPipelines()) {
+            // A key a worker had prepared for this very draw: the prefetch came too late.
+            const bool known = prepared &&
+                               prepared->state.load(std::memory_order_acquire) == PreparedDraw::Ready &&
+                               prepared->key == sel.graphics_key;
+            prefetch_stats[known ? 4 : 5].fetch_add(1, std::memory_order_relaxed);
+        }
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer{CompileTimer::GraphicsPipe};
@@ -1135,6 +1304,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
 const ComputePipeline* PipelineCache::GetComputePipeline() {
     PublishShaders();
     PublishGraphics();
+    DrainPrefetch();
     PumpWarmUp();
     AdoptPrecompiled();
     if (!RefreshComputeKey()) {

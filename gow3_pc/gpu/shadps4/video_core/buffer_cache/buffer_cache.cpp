@@ -682,6 +682,14 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
 }
 
 static std::atomic<u32> g_write_fault_overlap, g_write_fault_same_page, g_write_fault_window;
+static std::atomic<u32> g_shared_finished_writes; // GOW3_SHARED_FINISHED_WRITES
+bool BufferCache::SharedFinishedWrites() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_SHARED_FINISHED_WRITES");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
 static std::atomic<u64> g_write_fault_gpu_bytes;
 static std::atomic<u32> g_lazy_writes, g_lazy_cpu_wins, g_readback_waits, g_async_readbacks;
 static std::atomic<u32> g_readback_read_waits;
@@ -835,10 +843,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                             overlap, same_page, window_only,
                             double(gpu_bytes) / std::max(1u, overlap + same_page + window_only));
                 std::printf("  lazy writes (no download): %u; GPU-written bytes the CPU overwrote later: %u; "
-                            "writes into pages shared with GPU data: %llu; pages fetched without waiting "
-                            "for queued GPU work: %u (%u after waiting for their own write only)\n",
+                            "writes into pages shared with GPU data: %llu (%u beside final GPU bytes); "
+                            "pages fetched without waiting for queued GPU work: %u (%u after waiting "
+                            "for their own write only)\n",
                             g_lazy_writes.exchange(0), g_lazy_cpu_wins.exchange(0),
                             static_cast<unsigned long long>(std::exchange(g_shared_writes_count, 0)),
+                            g_shared_finished_writes.exchange(0),
                             g_direct_page_reads.exchange(0), g_waited_page_reads.exchange(0));
                 {
                     const u32 lazy_lines = g_guard_lazy_lines.exchange(0);
@@ -1115,6 +1125,51 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                 return;
             }
+            // Diagnostics: GOW3_SHARED_WRITES=0 turns the shared path below off (the write
+            // downloads first).
+            static const bool shared_writes = [] {
+                const char* env = std::getenv("GOW3_SHARED_WRITES");
+                return !(env && env[0] == '0');
+            }();
+            // The page becomes the CPU's and the GPU's: its GPU bytes stay the GPU's (uploads skip
+            // them) until a readback brings them, and the guest copy of those bytes is kept so the
+            // readback guard can tell the CPU's later writes into them.
+            const auto share_page = [&] {
+                auto& slot = lazy_pages[page];
+                if (!slot) {
+                    slot = std::make_unique<LazyPage>();
+                }
+                slot->gpu_wins = true;
+                std::array<u8, LAZY_PAGE_SIZE> guest;
+                if (!memory->TryReadBacking(page, guest.data(), LAZY_PAGE_SIZE)) {
+                    memory->CopySparseMemory(page, guest.data(), LAZY_PAGE_SIZE);
+                }
+                gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
+                    for (VAddr byte = lo; byte < hi; ++byte) {
+                        if (!slot->tracked.test(byte - page)) {
+                            slot->tracked.set(byte - page);
+                            slot->bytes[byte - page] = guest[byte - page];
+                        }
+                    }
+                });
+                shared_readbacks.emplace_back(page, 4096);
+                NoteReadbackKind(page, 4096, ReadbackSharedPage);
+                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                ++g_shared_writes_count;
+            };
+            // gow3 22 Oct 2026 (GOW3_SHARED_FINISHED_WRITES=1): a write beside the page's GPU bytes
+            // (false sharing: 761-930 of 910-1,039 CPU writes into GPU data per 5 s in Sarah's
+            // bedroom) is shared whether those bytes are in flight or final. Final ones were
+            // copied back first (the batch or CopyFinishedGpuPage below), the guest thread waiting
+            // for the GPU command thread and the copy, 1-20 ms each: ~3 s of guest time per 5 s.
+            // Now the write goes ahead at once and an asynchronous readback of only the page's GPU
+            // bytes, at the end of the submission (Rasterizer::SyncSmallGpuWrites), brings them.
+            if (SharedFinishedWrites() && shared_writes &&
+                !gpu_modified_ranges.Intersects(device_addr, size)) {
+                share_page();
+                g_shared_finished_writes.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
             // gow3 17 Oct 2026: the page's GPU bytes are final (the last GPU write into its 1 MiB
             // window has finished) and the arenas are in CPU-mappable video memory (Resizable BAR,
             // integrated GPUs): copy them from there. The download below waited for all GPU work
@@ -1205,11 +1260,6 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // work). The write goes ahead; the page's GPU bytes stay the GPU's (uploads skip
             // them) until the next readback brings them. No guest bytes are compared (the
             // lazy-write merge did, and put stale GPU bytes back into rewritten data).
-            // Diagnostics: GOW3_SHARED_WRITES=0 turns this path off (the write downloads first).
-            static const bool shared_writes = [] {
-                const char* env = std::getenv("GOW3_SHARED_WRITES");
-                return !(env && env[0] == '0');
-            }();
             // gow3 17 Oct 2026: GPU bytes partly in flight, partly old (a crowded street: ~120
             // per 5 s, each a full download): the old ones are fetched on the second queue (they
             // are final), then the page takes the shared path.
@@ -1219,29 +1269,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             }
             if (shared_writes && !gpu_modified_ranges.Intersects(device_addr, size)) {
                 if (GpuBytesInFlight(page)) {
-                    auto& slot = lazy_pages[page];
-                    if (!slot) {
-                        slot = std::make_unique<LazyPage>();
-                    }
-                    slot->gpu_wins = true;
-                    // The guest copy of the GPU bytes before the CPU can write the page without a
-                    // fault: the readback guard tells the CPU's later writes into them by it.
-                    std::array<u8, LAZY_PAGE_SIZE> guest;
-                    if (!memory->TryReadBacking(page, guest.data(), LAZY_PAGE_SIZE)) {
-                        memory->CopySparseMemory(page, guest.data(), LAZY_PAGE_SIZE);
-                    }
-                    gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
-                        for (VAddr byte = lo; byte < hi; ++byte) {
-                            if (!slot->tracked.test(byte - page)) {
-                                slot->tracked.set(byte - page);
-                                slot->bytes[byte - page] = guest[byte - page];
-                            }
-                        }
-                    });
-                    shared_readbacks.emplace_back(page, 4096);
-                    NoteReadbackKind(page, 4096, ReadbackSharedPage);
-                    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
-                    ++g_shared_writes_count;
+                    share_page();
                     return;
                 }
             }

@@ -3350,6 +3350,14 @@ void Rasterizer::SyncSmallGpuWrites() {
         buffer_cache.DownloadRanges(synced_ranges);
     }
     // Pages the CPU now shares with GPU data in flight (BufferCache: shared write path).
+    // gow3 22 Oct 2026 (GOW3_SHARED_FINISHED_WRITES=1): their GPU bytes (only those: the
+    // readback's pieces are the GPU-written ranges) come back after this submission even without
+    // the constants sync; final ones are in no other readback.
+    if (VideoCore::BufferCache::SharedFinishedWrites() && !sync_gpu_constants) {
+        if (const auto shared = buffer_cache.TakeSharedReadbacks(); !shared.empty()) {
+            buffer_cache.DownloadRangesAsync(shared);
+        }
+    }
     for (const auto& range : buffer_cache.TakeSharedReadbacks()) {
         small_gpu_writes.push_back(range);
     }

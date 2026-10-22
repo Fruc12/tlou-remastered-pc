@@ -170,6 +170,14 @@ def main():
     # cores with the game's six busy job workers in some sessions, for the whole session: 33-34
     # instead of 46-47 FPS in 5 of 11 runs. Above normal: 47 FPS in 4 runs of 4.
     env.setdefault("GOW3_GPU_THREAD_PRIORITY", "above")
+    # A game thread's write into memory the GPU is still writing waits for that GPU work itself,
+    # not on the GPU command thread (which stopped drawing meanwhile): 32-36 -> 41-47 FPS in the
+    # bedroom (4 alternating runs, 22 Oct 2026). Sarah's hair shakes with and without it.
+    env.setdefault("GOW3_FETCH_NO_BLOCK", "1")
+    # New pipelines the draw preparation workers see ahead are built on the compiler threads, in
+    # parallel, before the GPU command thread reaches their draws (an empty cache: 573 -> 167 ms
+    # of compiling on that thread). The first visit of an area hitches less.
+    env.setdefault("GOW3_PREFETCH_PIPELINES", "1")
     env.setdefault("GOW3_NATIVE_TSC", "1")
     env.setdefault("GOW3_FRAME_STATS", "1")
     # Scripted controller input (tools/tlou_pad.py writes it).

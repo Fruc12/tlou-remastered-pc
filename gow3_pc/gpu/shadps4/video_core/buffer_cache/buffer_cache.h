@@ -595,6 +595,10 @@ public:
     std::vector<std::pair<VAddr, u64>> TakeSharedReadbacks() {
         return std::exchange(shared_readbacks, {});
     }
+    /// gow3 22 Oct 2026 (GOW3_SHARED_FINISHED_WRITES=1): a CPU write beside final GPU bytes of
+    /// its page takes the shared path too (no copy back first); the rasterizer then reads back
+    /// the shared pages' GPU bytes at the end of each submission.
+    static bool SharedFinishedWrites();
 
 private:
     std::map<VAddr, std::unique_ptr<LazyPage>> lazy_pages;

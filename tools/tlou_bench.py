@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--seconds", type=int, default=30)
     parser.add_argument("--turn", action="store_true", help="Turn the camera during the measurement")
     parser.add_argument("--threads", action="store_true", help="Also sample the busiest threads' CPU load")
+    parser.add_argument("--saves", type=Path, default=ROOT / "analysis/tlou-test-saves",
+                        help="Saves folder whose checkpoint is continued (a copy of the player's, never theirs)")
     parser.add_argument("vars", nargs="*")
     args = parser.parse_args()
     env = dict(os.environ)
@@ -39,11 +41,18 @@ def main():
     pid_file = ROOT / "analysis/tlou/probe.pid"
     pid_file.unlink(missing_ok=True)
     probe = subprocess.Popen([sys.executable, str(ROOT / "tools/probe_tlou.py"), "--boot", "--seconds", "900",
-                              "--capture", "800", "--saves", str(ROOT / "analysis/tlou-test-saves")],
+                              "--capture", "800", "--saves", str(args.saves)],
                              env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # This run's game, read once: a later run rewrites probe.pid, and stopping by that file at the
+    # end once stopped another run's game.
+    game_pid = ""
+    for _ in range(600):
+        if pid_file.exists() and (game_pid := pid_file.read_text().strip()):
+            break
+        time.sleep(0.2)
     try:
         pad("wait=60", "cross", "wait=6", "cross", "wait=4", "cross", "wait=60")
-        if "to world-home" not in LOG.read_text(encoding="utf-8", errors="replace"):
+        if not re.search(r"Switching world: from core to world-", LOG.read_text(encoding="utf-8", errors="replace")):
             print("the checkpoint did not load")
             return 1
         start_line = len(LOG.read_text(encoding="utf-8", errors="replace").splitlines())
@@ -59,7 +68,7 @@ def main():
             # Each thread's CPU time over the measurement (Get-Process: not localized, unlike the
             # per-thread performance counters), as a share of one hardware thread.
             span = max(args.seconds - 4, 1)
-            game = pid_file.read_text().strip()
+            game = game_pid
             per_thread = (f"$a = @{{}}; foreach ($t in (Get-Process -Id {game}).Threads) {{ "
                           "$a[$t.Id] = $t.TotalProcessorTime.TotalMilliseconds }; "
                           f"Start-Sleep -Seconds {span}; foreach ($t in (Get-Process -Id {game}).Threads) {{ "
@@ -115,7 +124,7 @@ def main():
         return 0
     finally:
         try:
-            subprocess.run(["taskkill", "/PID", pid_file.read_text().strip(), "/F"],
+            subprocess.run(["taskkill", "/PID", game_pid, "/F"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError:
             pass

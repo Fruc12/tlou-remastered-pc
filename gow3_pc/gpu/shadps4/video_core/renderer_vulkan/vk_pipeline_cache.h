@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <shared_mutex>
 #include <variant>
 #include <boost/container/static_vector.hpp>
@@ -159,6 +160,13 @@ public:
     /// and flattened user data match; null to take the regular path.
     const GraphicsPipeline* TryPreparedPipeline(const PreparedDraw& prepared);
 
+    /// gow3 22 Oct 2026 (GOW3_PREFETCH_PIPELINES=1): worker side, after PrepareGraphicsPipeline
+    /// found the draw's key: a pipeline nobody built or requested yet is handed to the GPU
+    /// thread (a snapshot of the selection), which starts its build on the compiler threads at
+    /// its next draw (DrainPrefetch). The GPU thread then waits for that build at the draw
+    /// instead of compiling the pipeline itself, and the builds of a burst run in parallel.
+    void PrefetchGraphicsPipeline(const PipelineSelection& sel);
+
     /// gow3: the prepared draw the last GetGraphicsPipeline used, or null (regular path).
     [[nodiscard]] const PreparedDraw* UsedPrepared() const noexcept {
         return used_prepared;
@@ -213,6 +221,16 @@ private:
                      std::optional<Shader::StageSpecialization> specialization = {});
     void PublishShaders(bool wait = false);
     void PublishGraphics(bool wait = false);
+    /// GOW3_PREFETCH_PIPELINES: GPU thread, starts the builds the workers requested.
+    void DrainPrefetch();
+    std::mutex prefetch_mutex;
+    std::vector<std::shared_ptr<AsyncGraphicsCompilation>> prefetch_inbox; ///< prefetch_mutex
+    std::unordered_set<u64> prefetch_requested; ///< key hashes requested so far; prefetch_mutex
+    std::atomic<u32> prefetch_inbox_size{0};
+    /// Requested, queued, built (published), waited for at the draw, compiled by the GPU thread
+    /// anyway with a key a worker had prepared, compiled without one, failed.
+    std::atomic<u32> prefetch_stats[7]{};
+    std::atomic<u64> prefetch_wait_ns{};
     void FinishCompilations();
     void SeedWorkerCaches();
     bool CheckCacheProfile();

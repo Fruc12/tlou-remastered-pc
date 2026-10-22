@@ -147,6 +147,44 @@ struct PageManager::Impl {
         count[0] = count[1] = ns[0] = ns[1] = write_count = write_ns = 0;
     }
 
+    // gow3 22 Oct 2026 (GOW3_FAULT_STATS=1): every guest write fault by duration, every 5 s
+    // (the GPU-data ones wait for the GPU command thread and a copy back from the GPU).
+    static void NoteWriteFaultTime(bool gpu_thread, std::chrono::steady_clock::duration took) {
+        static const bool enabled = [] {
+            const char* env = std::getenv("GOW3_FAULT_STATS");
+            return env && env[0] == '1';
+        }();
+        if (!enabled || gpu_thread) {
+            return;
+        }
+        static std::mutex mutex;
+        static std::array<u64, 6> counts{}, ns{};
+        static auto last = std::chrono::steady_clock::now();
+        const u64 took_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(took).count();
+        const u32 bucket = took_ns < 20'000      ? 0
+                           : took_ns < 200'000   ? 1
+                           : took_ns < 1'000'000 ? 2
+                           : took_ns < 5'000'000 ? 3
+                           : took_ns < 20'000'000 ? 4
+                                                  : 5;
+        std::scoped_lock lock{mutex};
+        ++counts[bucket];
+        ns[bucket] += took_ns;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last < std::chrono::seconds{5}) {
+            return;
+        }
+        last = now;
+        std::printf("Write fault times (5 s): <20 us %llu (%.1f ms), <0.2 ms %llu (%.1f ms), <1 ms %llu "
+                    "(%.1f ms), <5 ms %llu (%.1f ms), <20 ms %llu (%.1f ms), longer %llu (%.1f ms)\n",
+                    (unsigned long long)counts[0], ns[0] / 1e6, (unsigned long long)counts[1], ns[1] / 1e6,
+                    (unsigned long long)counts[2], ns[2] / 1e6, (unsigned long long)counts[3], ns[3] / 1e6,
+                    (unsigned long long)counts[4], ns[4] / 1e6, (unsigned long long)counts[5], ns[5] / 1e6);
+        std::fflush(stdout);
+        counts.fill(0);
+        ns.fill(0);
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         // gow3: the draw recording thread handles its faults inline too (vk_draw_pipe.h).
@@ -179,6 +217,7 @@ struct PageManager::Impl {
             const u64 downloads = gow3_downloads;
             const auto start = std::chrono::steady_clock::now();
             const bool handled = rasterizer->OnWriteFault(addr, is_gpu_thread);
+            NoteWriteFaultTime(is_gpu_thread, std::chrono::steady_clock::now() - start);
             if (gow3_downloads != downloads || is_gpu_thread) {
                 // A CPU write into GPU-written memory: the window was downloaded first (and every
                 // GPU-side thread write fault: the runtime writing guest memory itself).

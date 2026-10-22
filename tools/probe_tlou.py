@@ -29,6 +29,18 @@ def find_update(game):
     return None
 
 
+def app_version(folder):
+    """APP_VER from the folder's sce_sys/param.sfo, or None."""
+    sys.path.insert(0, str(ROOT / "gow3_pc/scripts"))
+    try:
+        from prepare import sfo
+        return sfo((folder / "sce_sys/param.sfo").read_bytes()).get("APP_VER")
+    except (OSError, ValueError, ImportError):
+        return None
+    finally:
+        sys.path.pop(0)
+
+
 def boot_view(base, update):
     """Copies of what the prepare scripts read (eboot.bin, sce_module, sce_sys), the update's
     over the game's, in analysis/views (copied again only when a source changes)."""
@@ -101,6 +113,12 @@ def main():
     args = parser.parse_args()
     game = args.game.resolve()
     update = find_update(game)
+    if update:
+        print(f"Game {game} (version {app_version(game)}) with its update {update} "
+              f"(version {app_version(update)}): the update's executable and files are used", flush=True)
+    else:
+        print(f"Game {game} (version {app_version(game)}); no update found next to it "
+              f"({game.name}-patch or {game.name}-update, or TLOU_UPDATE=<folder>)", flush=True)
     out = ROOT / "analysis/tlou"
     user = ROOT / "analysis/tlou-user"
     user.mkdir(parents=True, exist_ok=True)
@@ -121,6 +139,16 @@ def main():
     env["PATH"] = str(msys / "clang64/bin") + os.pathsep + env.get("PATH", "")
     env["GOW3_GPU_USER_DIR"] = str(user)
     env.setdefault("GOW3_CONFIG", str(user / "tlou.ini"))
+    # A draw whose pipeline is still compiling in the background is skipped: the curtain on the
+    # title screen and the characters' hair flashed white the first time they were drawn. New
+    # pipelines are compiled at once instead (a short stall the first time; the pipeline cache
+    # keeps them), unless the player chose otherwise in the in-game menu (async_shaders).
+    try:
+        chosen = "async_shaders=" in Path(env["GOW3_CONFIG"]).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        chosen = False
+    if not chosen:
+        env.setdefault("GOW3_ASYNC_SHADERS", "0")
     # The game compares sceKernelGetDirectMemorySize with a retail console's 4608 MiB; any other
     # size makes it reserve a development kit's 768 MiB debug area.
     env.setdefault("GOW3_DMEM_REPORT_MB", "4608")
@@ -170,6 +198,8 @@ def main():
     start = time.monotonic()
     with (out / (name + ".log")).open("wb") as log:
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        # Test scripts stop this instance by its PID, never a game the player started.
+        (out / "probe.pid").write_text(str(process.pid), encoding="ascii")
         deadline = start + args.seconds if args.seconds else None
         result["timed_out"] = False
         while process.poll() is None:

@@ -17,6 +17,7 @@
 #endif
 #include <time.h>
 #include "gow3_copy.h"
+#include "gow3_threads.h"
 #include "gow3_toggles.h"
 #include "gow3_watch_range.h"
 #include <cstdio>
@@ -57,8 +58,16 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
     co_yield {};                                                                                   \
     FIBER_ENTER(name);
 
+// GOW3_FRAMES_IN_FLIGHT (Liverpool::WaitFramesRetired): how often the graphics queue gave way
+// waiting on a condition, and the packet it waited at.
+static std::atomic<u64> g_gfx_yields{0};
+static std::atomic<u32> g_gfx_yield_opcode{0};
+static std::atomic<u32> g_gfx_opcode{0}; ///< the graphics packet being decoded
+
 #define YIELD_CE() YIELD(ccb_task_name)
-#define YIELD_GFX() YIELD(dcb_task_name)
+#define YIELD_GFX()                                                                                \
+    g_gfx_yields.fetch_add(1, std::memory_order_relaxed);                                          \
+    YIELD(dcb_task_name)
 #define YIELD_ASC(id) YIELD(acb_task_name[id])
 
 #define RESUME(task, name)                                                                         \
@@ -344,14 +353,7 @@ void Liverpool::ProcessLoop(std::stop_token stoken) {
     Gow3Profiler::Start(GetCurrentThreadId(), "GPU command thread");
     // gow3 18 Oct 2026 (tests): GOW3_GPU_THREAD_PRIORITY=above|high and GOW3_GPU_THREAD_CORE=<n>
     // (one logical processor) for this thread, which limits the frame rate in heavy scenes.
-    if (const char* env = std::getenv("GOW3_GPU_THREAD_PRIORITY"); env && *env) {
-        const std::string_view value{env};
-        const int priority = value == "high" ? THREAD_PRIORITY_HIGHEST
-                             : value == "above" ? THREAD_PRIORITY_ABOVE_NORMAL
-                                                : THREAD_PRIORITY_NORMAL;
-        SetThreadPriority(GetCurrentThread(), priority);
-        std::printf("GPU command thread: priority %s\n", env);
-    }
+    Gow3Threads::ApplyGpuThreadPriority("GPU command thread");
     if (const char* env = std::getenv("GOW3_GPU_THREAD_CORE"); env && *env) {
         const int core = std::atoi(env);
         if (core >= 0 && core < 64) {
@@ -475,6 +477,7 @@ void Liverpool::ProcessLoop(std::stop_token stoken) {
                 task.destroy();
                 if (curr_qid == GfxQueueId) {
                     gfx_submits_done.fetch_add(1, std::memory_order_release);
+                    RetireDecodedFrames();
                 }
 
                 std::scoped_lock lock{queue.m_access};
@@ -503,6 +506,10 @@ void Liverpool::ProcessLoop(std::stop_token stoken) {
             }
             submit_done = false;
         }
+        // GOW3_FRAMES_IN_FLIGHT: a frame whose last graphics submission was decoded before its
+        // sceGnmSubmitDone. After submit_done is cleared: a SubmitDone that set it before has
+        // queued its frame end already, a later one wakes this thread again.
+        RetireDecodedFrames();
 
         // gow3: the guest takes GPU idle (sceGnmSubmitDone) as its work being done and frees
         // the objects that hold its fence labels. The labels must be written before: the draw
@@ -522,6 +529,128 @@ void Liverpool::ProcessLoop(std::stop_token stoken) {
             }
         }
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+    }
+}
+
+// GOW3_FRAMES_IN_FLIGHT diagnostics: the graphics memory wait the GPU command thread is in.
+static std::atomic<const PM4CmdWaitRegMem*> g_gfx_wait{nullptr};
+static std::atomic<bool> g_gfx_wait_vo{false};
+
+void Liverpool::RetireDecodedFrames() {
+    if (FramesInFlight() == 0) {
+        return;
+    }
+    const u64 decoded = gfx_submits_done.load(std::memory_order_acquire);
+    std::unique_lock lk{frame_ends_mutex};
+    while (!frame_ends.empty() && frame_ends.front() <= decoded) {
+        frame_ends.pop_front();
+        struct Retire {
+            Liverpool* liverpool;
+            u64 frame;
+        } retire{this, ++frames_decoded};
+        lk.unlock();
+        // The frame's draws and fences may still be with the draw recording thread and the
+        // Vulkan recording thread: retired after them, in order (fences are written in order).
+        const auto task = [](Vulkan::Rasterizer& rasterizer, const u8* data) {
+            const auto retire = *reinterpret_cast<const Retire*>(data);
+            rasterizer.SignalAfterHostCopies(
+                [retire] { retire.liverpool->MarkFrameRetired(retire.frame); });
+        };
+        if (rasterizer) {
+            rasterizer->RunInOrder(task, &retire, sizeof(retire));
+        } else {
+            MarkFrameRetired(retire.frame);
+        }
+        lk.lock();
+    }
+}
+
+void Liverpool::MarkFrameRetired(u64 frame) {
+    {
+        std::scoped_lock lk{retired_mutex};
+        frames_retired.store(frame, std::memory_order_release);
+    }
+    retired_cv.notify_all();
+}
+
+void Liverpool::WaitFramesRetired(u64 count) {
+    if (FramesRetired() >= count) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    std::unique_lock lk{retired_mutex};
+    // The guest goes on regardless when the graphics queue has decoded nothing for 50 ms while
+    // it waits on a condition (it yields, or sleeps in a memory wait): that may be something the
+    // guest writes after this submission (memory, a REWIND packet's valid bit). The checkpoint
+    // load of Sarah's bedroom froze that way about once in five runs, the game halting with "A
+    // frame did not complete in 2.00 seconds". That frame is then as without the wait. A queue
+    // busy decoding (a pipeline compile, say) does not yield and is waited for.
+    const auto start = Clock::now();
+    auto last_report = start;
+    u64 stuck_decoded = gfx_submits_done.load(std::memory_order_acquire);
+    u64 last_yields = g_gfx_yields.load(std::memory_order_relaxed);
+    auto stuck_since = start;
+    while (!retired_cv.wait_for(lk, std::chrono::milliseconds{5},
+                                [&] { return FramesRetired() >= count; })) {
+        const auto now = Clock::now();
+        const auto* wait = g_gfx_wait.load(std::memory_order_acquire);
+        const u64 decoded = gfx_submits_done.load(std::memory_order_acquire);
+        const u64 yields = g_gfx_yields.load(std::memory_order_relaxed);
+        const bool waiting = wait || yields != last_yields;
+        last_yields = yields;
+        if (!waiting || decoded != stuck_decoded) {
+            stuck_decoded = decoded;
+            stuck_since = now;
+        } else if (now - stuck_since >= std::chrono::milliseconds{50}) {
+            static u64 releases = 0;
+            if (++releases <= 20 || releases % 1000 == 0) {
+                if (wait) {
+                    std::printf("Frame wait: released the guest after %.0f ms (frame %llu wanted, "
+                                "%llu retired), the graphics queue waiting for %#llx func %u ref "
+                                "%#x mask %#x, now %#x%s (%llu so far)\n",
+                                std::chrono::duration<double, std::milli>(now - start).count(),
+                                (unsigned long long)count, (unsigned long long)FramesRetired(),
+                                static_cast<unsigned long long>(wait->Address<VAddr>()),
+                                unsigned(wait->function.Value()), wait->ref, wait->mask,
+                                *wait->Address<u32*>(),
+                                g_gfx_wait_vo.load() ? " (a video out label)" : "",
+                                (unsigned long long)releases);
+                } else {
+                    std::printf("Frame wait: released the guest after %.0f ms (frame %llu wanted, "
+                                "%llu retired), the graphics queue yielding (packet %#x) "
+                                "(%llu so far)\n",
+                                std::chrono::duration<double, std::milli>(now - start).count(),
+                                (unsigned long long)count, (unsigned long long)FramesRetired(),
+                                g_gfx_yield_opcode.load(std::memory_order_relaxed),
+                                (unsigned long long)releases);
+                }
+                std::fflush(stdout);
+            }
+            return;
+        }
+        // A wait over a second is reported with where each counter stands.
+        if (now - last_report >= std::chrono::seconds{1}) {
+            last_report = now;
+            u64 front = 0;
+            size_t ends = 0;
+            {
+                std::scoped_lock ends_lock{frame_ends_mutex};
+                ends = frame_ends.size();
+                front = ends ? frame_ends.front() : 0;
+            }
+            std::printf("Frame wait over 1 s: frame %llu wanted, %llu retired, %llu decoded; %zu "
+                        "frame ends queued (first at submission %llu); graphics submissions %llu "
+                        "queued, %llu decoded; %u submissions and %u commands pending; the "
+                        "graphics queue at packet %#x, %s (last yield at packet %#x)\n",
+                        (unsigned long long)count, (unsigned long long)FramesRetired(),
+                        (unsigned long long)frames_decoded, ends, (unsigned long long)front,
+                        (unsigned long long)gfx_submits_queued.load(),
+                        (unsigned long long)decoded, num_submits.load(), num_commands.load(),
+                        g_gfx_opcode.load(std::memory_order_relaxed),
+                        wait ? "in a memory wait" : waiting ? "yielding" : "not yielding",
+                        g_gfx_yield_opcode.load(std::memory_order_relaxed));
+            std::fflush(stdout);
+        }
     }
 }
 
@@ -1631,6 +1760,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            g_gfx_opcode.store(static_cast<u32>(opcode), std::memory_order_relaxed);
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
@@ -2079,6 +2209,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (mem_semaphore->IsSignaling()) {
                     mem_semaphore->Signal();
                 } else {
+                    g_gfx_yield_opcode.store(static_cast<u32>(opcode), std::memory_order_relaxed);
                     while (!mem_semaphore->Signaled()) {
                         YIELD_GFX();
                     }
@@ -2095,6 +2226,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
+                g_gfx_yield_opcode.store(static_cast<u32>(opcode), std::memory_order_relaxed);
                 while (!rewind->Valid()) {
                     YIELD_GFX();
                 }
@@ -2146,7 +2278,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (rasterizer) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                     }
+                    g_gfx_wait_vo.store(true);
+                    g_gfx_wait.store(wait_reg_mem, std::memory_order_release);
+                    const auto vo_start = std::chrono::steady_clock::now();
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
+                    g_gfx_wait.store(nullptr, std::memory_order_release);
+                    if (wait_trace) {
+                        // (GOW3_WAIT_TRACE=1) time this thread sleeps for display buffers.
+                        static double vo_ms = 0.0;
+                        static u64 vo_waits = 0;
+                        static auto vo_last = vo_start;
+                        const auto now = std::chrono::steady_clock::now();
+                        vo_ms += std::chrono::duration<double, std::milli>(now - vo_start).count();
+                        ++vo_waits;
+                        if (now - vo_last >= std::chrono::seconds{5}) {
+                            std::printf("Wait trace (5 s): %llu display buffer waits, %.1f ms\n",
+                                        (unsigned long long)vo_waits, vo_ms);
+                            vo_last = now;
+                            vo_ms = 0.0;
+                            vo_waits = 0;
+                        }
+                    }
                     break;
                 }
                 // gow3: a fence handed to the draw recording thread counts as written: that
@@ -2182,6 +2334,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 u32 num_seen = 0, polls = 0;
                 const bool memory_wait =
                     wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+                g_gfx_wait_vo.store(vo_port->IsVoLabel(wait_addr));
+                g_gfx_wait.store(wait_reg_mem, std::memory_order_release);
+                g_gfx_yield_opcode.store(static_cast<u32>(opcode), std::memory_order_relaxed);
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     if (wait_durations && memory_wait) {
                         ++polls;
@@ -2196,6 +2351,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     }
                     YIELD_GFX();
                 }
+                g_gfx_wait.store(nullptr, std::memory_order_release);
                 if (wait_durations && memory_wait && polls) {
                     static std::mutex mutex;
                     static std::array<u64, 5> buckets{};

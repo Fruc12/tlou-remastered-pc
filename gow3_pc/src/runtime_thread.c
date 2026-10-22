@@ -332,6 +332,13 @@ static void *host_start(void *p) {
     set_host_name(t->name);
 #ifdef _WIN32
     apply_guest_scheduling(t,GetCurrentThread(),"started");
+    { /* gow3 diagnostics: GOW3_THREAD_IDS=1 logs the host thread ID (Windows' per-thread counters) */
+        const char *e=getenv("GOW3_THREAD_IDS");
+        if (e && e[0]=='1') {
+            printf("Thread: guest '%s' is host thread %lu\n",t->name,(unsigned long)GetCurrentThreadId());
+            fflush(stdout);
+        }
+    }
     { /* gow3 diagnostics: GOW3_PROFILE_GUEST=<prefixes> (see profile_guest_wanted) */
         extern void gow3_profile_current(const char *name);
         if (profile_guest_wanted(t->name)) gow3_profile_current(t->name);

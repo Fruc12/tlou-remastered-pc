@@ -6,6 +6,9 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 #ifdef _WIN32
 #include <bit>
@@ -30,6 +33,23 @@ inline unsigned Available() {
 /// The calling thread only runs when cores are otherwise idle (lowest Windows priority).
 inline void MakeBackground() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+}
+
+/// GOW3_GPU_THREAD_PRIORITY=above|high for the GPU command thread and, since 21 Oct 2026, the
+/// draw and Vulkan recording threads. At normal priority they shared cores with the guest's
+/// busy job workers in some sessions for the whole session (The Last of Us Remastered: 33-34
+/// instead of 46-47 FPS in 5 of 11 runs, these threads at ~49% of a core instead of ~67%;
+/// "above": 47 FPS in 4 runs of 4).
+inline void ApplyGpuThreadPriority(const char* name) {
+    const char* env = std::getenv("GOW3_GPU_THREAD_PRIORITY");
+    if (!env || !*env) {
+        return;
+    }
+    const int priority = !std::strcmp(env, "high")    ? THREAD_PRIORITY_HIGHEST
+                         : !std::strcmp(env, "above") ? THREAD_PRIORITY_ABOVE_NORMAL
+                                                      : THREAD_PRIORITY_NORMAL;
+    SetThreadPriority(GetCurrentThread(), priority);
+    std::printf("%s: priority %s\n", name, env);
 }
 #else
 

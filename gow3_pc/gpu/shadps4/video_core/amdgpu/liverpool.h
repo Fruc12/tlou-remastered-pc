@@ -119,6 +119,10 @@ public:
 
     void SubmitDone() noexcept {
         submit_done_gen.fetch_add(1, std::memory_order_acq_rel);
+        if (FramesInFlight() > 0) {
+            std::scoped_lock lk{frame_ends_mutex};
+            frame_ends.push_back(gfx_submits_queued.load(std::memory_order_acquire));
+        }
         std::scoped_lock lk{submit_mutex};
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
         mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
@@ -140,6 +144,29 @@ public:
         }();
         return num_submits == 0 && (work_retired || !use_retired);
     }
+
+    /// gow3 21 Oct 2026: GOW3_FRAMES_IN_FLIGHT=<n> (0 default): after sceGnmSubmitDone the
+    /// guest's next submission waits only until the frame n before is retired (decoded, its
+    /// draws recorded and its fences written, in order with them), not for the GPU to be idle.
+    /// The GPU command thread then decodes frame N+1 while the guest builds N+2 instead of both
+    /// waiting on each other; fences still land before the guest takes their frame as done.
+    static u32 FramesInFlight() noexcept {
+        static const u32 frames = [] {
+            // Copied command buffers (GOW3_COPY_GPU_BUFFERS) start over at each SubmitDone.
+            const char* copy = std::getenv("GOW3_COPY_GPU_BUFFERS");
+            const char* env = std::getenv("GOW3_FRAMES_IN_FLIGHT");
+            if (!env || (copy && copy[0] == '1')) {
+                return 0u;
+            }
+            return static_cast<u32>(std::strtoul(env, nullptr, 10));
+        }();
+        return frames;
+    }
+    /// Frames (sceGnmSubmitDone calls) retired so far, and a wait for that count.
+    [[nodiscard]] u64 FramesRetired() const noexcept {
+        return frames_retired.load(std::memory_order_acquire);
+    }
+    void WaitFramesRetired(u64 count);
 
     void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
         vo_port = port;
@@ -347,6 +374,16 @@ private:
     std::atomic<bool> work_retired{true};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
+    /// GOW3_FRAMES_IN_FLIGHT: gfx_submits_queued at each sceGnmSubmitDone not yet decoded
+    /// (frame_ends_mutex), frames decoded (GPU command thread) and retired.
+    std::mutex frame_ends_mutex;
+    std::deque<u64> frame_ends;
+    u64 frames_decoded{};
+    std::atomic<u64> frames_retired{0};
+    std::mutex retired_mutex;
+    std::condition_variable retired_cv;
+    void RetireDecodedFrames();
+    void MarkFrameRetired(u64 frame);
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};

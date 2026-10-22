@@ -298,6 +298,7 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("gow3:VkRecorder");
 #ifdef _WIN32
     Gow3Profiler::Start(GetCurrentThreadId(), "Vulkan recording thread");
+    Gow3Threads::ApplyGpuThreadPriority("Vulkan recording thread");
 #endif
     while (true) {
         // Spin briefly before sleeping: the next chunk usually follows within microseconds,

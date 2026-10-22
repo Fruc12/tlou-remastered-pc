@@ -161,6 +161,7 @@ private:
         Common::SetCurrentThreadName("gow3:DrawRec");
 #ifdef _WIN32
         Gow3Profiler::Start(GetCurrentThreadId(), "draw recording thread");
+        Gow3Threads::ApplyGpuThreadPriority("draw recording thread");
 #endif
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);

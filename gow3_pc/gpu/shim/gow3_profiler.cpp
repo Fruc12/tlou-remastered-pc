@@ -303,6 +303,11 @@ void Walk(const std::vector<Module>& modules, CONTEXT context, Stack& stack) {
 
 void Start(unsigned long thread_id, const char* name) {
 #ifdef _WIN32
+    // GOW3_THREAD_IDS=1: the sampled threads' IDs, to name them in Windows' per-thread counters.
+    if (const char* ids = std::getenv("GOW3_THREAD_IDS"); ids && ids[0] == '1') {
+        std::printf("Thread: %s is host thread %lu\n", name, thread_id);
+        std::fflush(stdout);
+    }
     const char* env = std::getenv("GOW3_PROFILE");
     if (!env || !*env || std::atoi(env) <= 0) {
         return;

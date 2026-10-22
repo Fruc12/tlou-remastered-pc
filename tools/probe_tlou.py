@@ -155,8 +155,21 @@ def main():
     env.setdefault("GOW3_DIRECT_MEMORY_ACCESS", "1")
     env.setdefault("GOW3_PIPELINE_CACHE", "1")
     env.setdefault("GOW3_PIPELINE_BINARIES", "1")
-    env.setdefault("GOW3_DRAW_PIPE", "0")
-    env.setdefault("GOW3_VK_RECORD_THREAD", "0")
+    # Frame rate (Sarah's bedroom, GTX 1050 Ti Mobile: 20.6 FPS with none of these, 47 with all
+    # and the priority below; 48-53 walking upstairs): multithreaded rendering (draw and Vulkan
+    # recording threads), 28 FPS on its own with the DMA windows; the DMA shaders' guest
+    # memory synchronized in 256 KiB windows at the addresses in their user data instead of every
+    # CPU-dirty range; and one frame in flight, the game building the next frame while the GPU
+    # command thread still decodes the last one, instead of both waiting for the other at each
+    # sceGnmSubmitDone (liverpool.h, FramesInFlight).
+    env.setdefault("GOW3_DRAW_PIPE", "1")
+    env.setdefault("GOW3_VK_RECORD_THREAD", "1")
+    env.setdefault("GOW3_DMA_SYNC", "pointers 256")
+    env.setdefault("GOW3_FRAMES_IN_FLIGHT", "1")
+    # At normal priority the GPU command thread and the draw and Vulkan recording threads shared
+    # cores with the game's six busy job workers in some sessions, for the whole session: 33-34
+    # instead of 46-47 FPS in 5 of 11 runs. Above normal: 47 FPS in 4 runs of 4.
+    env.setdefault("GOW3_GPU_THREAD_PRIORITY", "above")
     env.setdefault("GOW3_NATIVE_TSC", "1")
     env.setdefault("GOW3_FRAME_STATS", "1")
     # Scripted controller input (tools/tlou_pad.py writes it).

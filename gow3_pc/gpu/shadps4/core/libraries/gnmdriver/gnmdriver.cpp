@@ -96,7 +96,19 @@ static void WaitGpuIdle() {
         const char* env = std::getenv("GOW3_SUBMIT_NO_WAIT");
         return env && env[0] == '1';
     }();
-    if (submission_lock == 0 || no_wait) {
+    if (no_wait) {
+        return;
+    }
+    // GOW3_FRAMES_IN_FLIGHT (Liverpool::FramesInFlight): the frame that many before the one
+    // being submitted is retired, not every frame before it.
+    if (const u32 in_flight = Liverpool::FramesInFlight(); in_flight > 0) {
+        lock.unlock();
+        if (frames_submitted > in_flight) {
+            liverpool->WaitFramesRetired(frames_submitted - in_flight);
+        }
+        return;
+    }
+    if (submission_lock == 0) {
         return;
     }
     // gow3 diagnostics (GOW3_SUBMIT_WAIT_STATS=1): how long the guest's submissions wait here
@@ -2400,7 +2412,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     LOG_DEBUG(Lib_GnmDriver, "called");
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
-    if (!liverpool->IsGpuIdle()) {
+    // GOW3_FRAMES_IN_FLIGHT: the next submission waits for an earlier frame (WaitGpuIdle), and
+    // sceGnmAreSubmitsAllowed keeps saying yes.
+    if (Liverpool::FramesInFlight() == 0 && !liverpool->IsGpuIdle()) {
         submission_lock = true;
     }
     liverpool->SubmitDone();

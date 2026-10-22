@@ -1,16 +1,16 @@
-// Keyboard, mouse and controller button prompts. The three games draw the button icons in their
-// text ("Press |X| to jump", the menus' legends) from one symbol font: data/fonts/ps4/symbol3.fnt
-// with a 512x512 atlas (Uncharted 3 keeps its colour and alpha in two textures). While the player
-// uses the keyboard and mouse, or a controller that is not a PlayStation one, the texture cache
-// uploads a redrawn atlas instead: key caps and mice for the bound keys and mouse buttons, or
-// Xbox-style buttons (A B X Y, LB RB, LT RT...) for the controller's, drawn here in the same cells
-// from the labels runtime_pad.c passes; the guest data stays as it is. The prompts the games draw
-// in the world ("Triangle -> chest") are separate BC1 pictures of the buttons (hud.pak; Uncharted
-// 1: particle.pak), stored upside down: the round face buttons and Uncharted 3's shoulder buttons
-// are recognised by the hash of their first mip and redrawn the same way, the bound key in place
-// of the PlayStation symbol (re-encoded to BC1 here). A device switch invalidates them, and they
-// upload again at their next use. runtime_pad.c picks the device (GOW3_PROMPTS);
-// GOW3_PROMPTS_LOG=1 logs the hash of each candidate upload (to add textures).
+// Keyboard, mouse and controller button prompts. Naughty Dog's engine draws the button icons in
+// its text ("Press |X| to jump", the menus' legends) from one symbol font: symbol3.fnt with a
+// 512x512 atlas (or its colour and alpha in two textures). While the player uses the keyboard and
+// mouse, or a controller that is not a PlayStation one, the texture cache uploads a redrawn atlas
+// instead: key caps and mice for the bound keys and mouse buttons, or Xbox-style buttons (A B X Y,
+// LB RB, LT RT...) for the controller's, drawn here in the same cells from the labels runtime_pad.c
+// passes; the guest data stays as it is. The prompts drawn in the world ("Triangle -> chest") are
+// separate BC1 pictures of the buttons, stored upside down: the round face buttons, the shoulder
+// buttons and the d-pad are recognised by the hash of their first mip and redrawn the same way,
+// the bound key in place of the PlayStation symbol (re-encoded to BC1 here). A device switch
+// invalidates them, and they upload again at their next use. runtime_pad.c picks the device
+// (GOW3_PROMPTS); GOW3_PROMPTS_LOG=1 logs the hash of each candidate upload: The Last of Us
+// Remastered's atlas and pictures are still to be added to known_textures that way.
 
 #include "gow3_prompts.h"
 
@@ -46,9 +46,9 @@ namespace {
 constexpr int Size = 512;
 
 // The textures by the XXH3 hash of their first mip's guest data (1D-tiled): the symbol font atlases
-// (512x512 RGBA8) and the button pictures (BC1 with mips, found by decoding the paks: 256x256 face
-// and shoulder buttons, 512x512 flat "HOLD" buttons in two press positions). The three games share
-// most pictures; Uncharted 1 and 2 have their own Cross, Uncharted 3 its own HOLD Triangles.
+// (512x512 RGBA8, or colour and alpha apart) and the button pictures (BC1 with mips, found by
+// decoding the paks: 256x256 face and shoulder buttons and d-pad, 512x512 flat "HOLD" buttons in
+// two press positions). Found with GOW3_PROMPTS_LOG and a dump of the loaded pictures.
 enum class Kind { Rgba, Color, Alpha, Face, Shoulder, Dpad };
 struct KnownTexture {
     u64 hash;
@@ -57,29 +57,12 @@ struct KnownTexture {
     const char* name;
 };
 constexpr KnownTexture known_textures[] = {
-    {0xad5ada34fd34c76bULL, Kind::Rgba, -1, "Uncharted 1 button atlas"},
-    {0x97779d0906f16551ULL, Kind::Rgba, -1, "Uncharted 2 button atlas"},
-    {0x8d03f2ff457f032dULL, Kind::Color, -1, "Uncharted 3 button atlas (colour)"},
-    {0xae0c06306763d424ULL, Kind::Alpha, -1, "Uncharted 3 button atlas (alpha)"},
     {0x5db884aa1bae54f9ULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Triangle picture"},
     {0x7af1abf688d8c824ULL, Kind::Face, GOW3_PROMPT_CIRCLE, "Circle picture"},
     {0x9edd4f2f0f64f6e5ULL, Kind::Face, GOW3_PROMPT_SQUARE, "Square picture"},
-    {0x2bf5d90eb864162fULL, Kind::Face, GOW3_PROMPT_CROSS, "Uncharted 1/2 Cross picture"},
-    {0x305c2c731ec227e6ULL, Kind::Face, GOW3_PROMPT_CROSS, "Uncharted 3 Cross picture"},
-    {0x25d954ce23a8f5e2ULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Uncharted 1/2 HOLD Triangle picture"},
-    {0xc96e34fbb203279eULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Uncharted 1/2 HOLD Triangle picture (pressed)"},
-    {0x4181f3ae6bd1efffULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Uncharted 3 HOLD Triangle picture"},
-    {0x07ff3d0e4090be85ULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Uncharted 3 HOLD Triangle picture (pressed)"},
-    {0x6c3fc301ede4114aULL, Kind::Shoulder, GOW3_PROMPT_L1, "Uncharted 3 L1 picture"},
-    {0x2e8ae3386e2a91ddULL, Kind::Shoulder, GOW3_PROMPT_L2, "Uncharted 3 L2 picture"},
-    {0xbd74a617a879f120ULL, Kind::Shoulder, GOW3_PROMPT_R1, "Uncharted 3 R1 picture"},
-    {0x784278339a5a55bfULL, Kind::Shoulder, GOW3_PROMPT_R2, "Uncharted 3 R2 picture"},
-    // 20 Oct 2026 (user, Uncharted 3 museum chapter): the d-pad with its up arm lit (256x256),
-    // found with GOW3_PROMPTS_LOG and a dump of the loaded pictures.
-    {0xe8a2f49b992621fcULL, Kind::Dpad, GOW3_PROMPT_UP, "Uncharted 3 d-pad up picture"},
 };
 
-// symbol3.fnt, the same in the three games: glyph id and its cell in the atlas.
+// symbol3.fnt: glyph id and its cell in the atlas.
 struct Cell {
     int id, x, y, w, h;
 };
@@ -1046,7 +1029,7 @@ void RedrawFace(Picture& pic, const std::string& label, bool controller) {
     FromCanvas(canvas, pic);
 }
 
-// Uncharted 3's shoulder buttons (upright): the "L1" etc. on the dark button replaced.
+// Shoulder button pictures (upright): the "L1" etc. on the dark button replaced.
 void RedrawShoulder(Picture& pic, const std::string& label) {
     const int w = pic.w, h = pic.h;
     int x0 = w, y0 = h, x1 = -1, y1 = -1;
@@ -1122,7 +1105,7 @@ void RedrawShoulder(Picture& pic, const std::string& label) {
     FromCanvas(canvas, pic);
 }
 
-// Uncharted 3's d-pad picture with one arm lit (orange): the bound key is written on that arm, in
+// A d-pad picture with one arm lit (orange): the bound key is written on that arm, in
 // the dark of the other arms, so the picture still reads as "this direction" (keyboard and mouse
 // only: other controllers' d-pads look the same).
 void RedrawDpad(Picture& pic, const std::string& label) {

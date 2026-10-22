@@ -459,7 +459,7 @@ void ImageTab() {
     ImGui::SeparatorText("Draw distance (experimental)");
     if (BeginRows("##draw_distance")) {
         if (!runtime_gamesettings_active()) {
-            InfoRow("Draw distances", "Uncharted 2 and 3 only (found once a game has started)");
+            InfoRow("Draw distances", "Not available in this game yet");
         }
         ImGui::BeginDisabled(!runtime_gamesettings_active());
         SliderRow("Object fade distance", s.fade_distance, 100, 400, "%d%%",
@@ -506,7 +506,7 @@ void PerformanceTab() {
         if (EmulatorSettings.GetVblankFrequency() <= 60 && (s.fps_limit == 0 || s.fps_limit > 60)) {
             InfoRow("Effective limit", "60 FPS until the game is started with 120");
         }
-        static const char* const queued_labels[] = {"1 (recommended)", "2 (faster; U2 NPCs float)", "Unlimited"};
+        static const char* const queued_labels[] = {"1 (recommended)", "2 (faster; less tested)", "Unlimited"};
         ChoiceRow("Frames queued", s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), "More frames queued: steadier FPS, slower response to input.");
         CheckRow("Compile new shaders in the background", s.async_shaders,
@@ -1044,9 +1044,8 @@ void ControlsTab() {
     ImGui::SeparatorText("Camera and aiming");
     if (BeginRows("##camera")) {
         changed |= PercentRow("Controller camera and aim speed", s.stick_speed, 50, 300,
-                              "How fast the right stick turns the camera (Uncharted 2 and 3; not yet in every camera). For "
-                              "aiming use the game's own Options > Controls > Aiming > Sensitivity (Uncharted 2: up "
-                              "to five times its old maximum).");
+                              "How fast the right stick turns the camera. It needs the game's camera hooks, not "
+                              "available in this game yet: use the game's own camera sensitivity options.");
         Row("Mouse");
         bool mouse = s.mouse;
         if (ImGui::Checkbox("##value", &mouse)) {
@@ -1267,7 +1266,7 @@ void Menu() {
     // gow3: the game's own title (param.sfo), not a fixed one.
     static const std::string heading = [] {
         const std::string_view title = Common::ElfInfo::Instance().Title();
-        return std::string(title.empty() ? "Uncharted: The Nathan Drake Collection" : title);
+        return std::string(title.empty() ? "The Last of Us Remastered" : title);
     }();
     // The shortcut can change in the Controls tab: the title shows it; "###" keeps the window's id.
     const std::string window_title = heading + "  (" + ShortcutText() + ")###gow3_menu";

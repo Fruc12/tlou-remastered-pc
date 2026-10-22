@@ -53,7 +53,7 @@ public:
         return velocity_mode ? velocity_camera.valid && depth_id
                              : current.valid && previous.valid && depth_id;
     }
-    /// gow3: GOW3_VELOCITY_PS=<pixel shader hash,...> (Uncharted): the game's camera velocity
+    /// gow3: GOW3_VELOCITY_PS=<pixel shader hash,...>: the game's camera velocity
     /// pass (for its motion blur). Its constants give this frame's view from depth and the
     /// previous frame's projection (OnVelocityConstants); no scene constants are needed then.
     /// Its first target holds distortion (heat haze, shockwaves), the second the camera motion

@@ -294,7 +294,7 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
     if (AmdGpu::IsFmask(image.GetDataFmt())) {
         IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
         if (is_written) {
-            // gow3 (GitHub #21, Uncharted 3 in Syria, 18 Oct 2026): a store or atomic through a
+            // gow3 (18 Oct 2026): a store or atomic through a
             // T# with an FMask format comes from a garbage descriptor read while a level loads
             // (no game writes FMask). The access is dropped instead of stopping the game.
             LOG_WARNING(Render_Recompiler, "Dropped a store to an FMask image (shader {:#x})",
@@ -599,7 +599,7 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
     }
     if (buffer.add_tid_enable && info.sw_stage != SwStage::Compute) {
         // gow3 17 Oct 2026: games do not use this outside compute; such a V# is garbage read from
-        // a table the game was still filling (Uncharted 3, once in a 4-core run). Upstream asserted
+        // a table the game was still filling (once in a 4-core run). Upstream asserted
         // and stopped the game here; drop the thread id instead (one wrong draw at most).
         LOG_WARNING(Render_Recompiler, "Thread ID buffer addressing outside of compute ignored (shader {:#x})",
                     info.pgm_hash);

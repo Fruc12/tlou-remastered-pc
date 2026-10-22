@@ -669,7 +669,7 @@ bool FewerDrains() {
 /// gow3 21 Oct 2026: GOW3_SKIP_IB_DRAIN=1 (multithreaded rendering): a nested command buffer on a
 /// compute queue (INDIRECT_BUFFER) does not drain the draw pipe. The packet itself only reads the
 /// nested buffer's words; every packet in it passes the drain check on its own, as nested buffers
-/// on the graphics queue do (PipelinedOpcode). Uncharted 3 on the laptop: ~2,300 such
+/// on the graphics queue do (PipelinedOpcode). On the laptop: ~2,300 such
 /// drains a second, the command thread waiting 10-28% of its time in them. Unlike
 /// GOW3_FEWER_DRAINS, memory waits keep their drains. Off by default until measured.
 bool SkipIbDrain() {
@@ -898,7 +898,7 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }();
     // gow3 16 Oct: a fence after ray-cast results (and later fences to the same label) is
     // written once those results are back in guest memory: the guest reads them as soon as
-    // it sees the fence. Written at once, it read the stale buffer (Uncharted 2: NPCs placed
+    // it sees the fence. Written at once, it read the stale buffer (NPCs placed
     // from old results fell from the sky). GOW3_DEFER_RAYCAST_FENCES=0: at once, as before.
     static const bool defer = [] {
         const char* env = std::getenv("GOW3_DEFER_RAYCAST_FENCES");
@@ -912,7 +912,7 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
                !wait_readbacks) {
         // The draw recording thread does not wait: the Vulkan recording thread signals the
         // fence after the copies queued before it. A fence after readbacks takes the path below
-        // on this thread too: signalled here, it overtook its readback and Uncharted 2's NPCs
+        // on this thread too: signalled here, it overtook its readback and NPCs
         // floated again with multithreaded rendering (16 Oct).
         rasterizer.SignalAfterHostCopies([eop] { SignalEop(eop); });
     } else {
@@ -961,13 +961,13 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         };
         // While any fence waits for its readback, later ones queue behind it: end-of-pipe fences
         // complete in order (the guest frees command buffers of frame N once it sees frame N+1
-        // done; a later fence written first let Uncharted 2 overwrite a command buffer the GPU
+        // done; a later fence written first let the game overwrite a command buffer the GPU
         // thread was still reading).
         if (wait_readbacks && cache.DeferUntilLastReadback(signal, label, value, bytes)) {
             // The GPU starts on the ray casts now rather than when the frame's command buffer is
             // submitted at its end: the fence (and the guest waiting for it) follows sooner.
             // gow3 21 Oct 2026 (GPU worker): GOW3_RAYCAST_FLUSH=lazy leaves them in the command
-            // buffer: ~65% of Uncharted 2's submissions came from here (~4 a frame), and on the
+            // buffer: ~65% of a game's submissions came from here (~4 a frame), and on the
             // Radeon iGPU the GPU idles ~0.4 ms at every submission boundary. When the guest
             // blocks on the fence before submitting more, the idle loop in Process flushes them
             // at once (HasUnsubmittedReadback); otherwise they go with the next submission.
@@ -986,7 +986,7 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
 
 // gow3: a compute queue RELEASE_MEM (fence, GDS counter store, interrupt) runs in order with the
 // dispatches handed to the draw recording thread (Rasterizer::RunInOrder) instead of draining
-// that thread first: Uncharted 2 releases after nearly every dispatch (~45k drains per second,
+// that thread first: a game may release after nearly every dispatch (~45k drains per second,
 // a third of the command thread's time with multithreaded rendering).
 struct ComputeRelease {
     PM4CmdReleaseMem packet;
@@ -1000,7 +1000,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const u32 pipe_id = release.pipe_id;
     // gow3 17 Oct 2026: multithreaded rendering: like end-of-pipe fences (RunEventWriteEop), the
     // Vulkan recording thread signals the fence after the copies queued before it instead of
-    // this thread waiting for them (Uncharted 3: ~1,800 compute releases a frame, 16% of the
+    // this thread waiting for them (~1,800 compute releases a frame, 16% of the
     // draw recording thread blocked on host copies at 4K).
     const auto sel = release.packet.data_sel.Value();
     if (Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences) &&
@@ -1023,7 +1023,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
                     // store here faulted when the label's page was write-protected after this
                     // release was recorded (GPU tracking); the fault handler then waited for the
                     // buffer cache, which the GPU command thread held while it waited for this
-                    // thread: Uncharted 3 froze for good with multithreaded rendering. The
+                    // thread: the game froze for good with multithreaded rendering. The
                     // record-time NoteLabelWrite above still covers labels on GPU-written pages;
                     // a page that only became so since misses it once per 64 KiB window.
                     if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
@@ -1042,7 +1042,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // gow3 17 Oct 2026: the fence value goes through the backing view like end-of-pipe labels
     // (RunEventWriteEop). A plain store faulted when the label shared a page with GPU-written
     // data, and the fault fetched that page's GPU bytes on the second queue, waiting for the GPU:
-    // Uncharted 3 at 4K, ~40 a second at ~1.7 ms each on the GPU command thread.
+    // At 4K, ~40 a second at ~1.7 ms each on the GPU command thread.
     release.packet.SignalFence(
         [pipe_id] {
             Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
@@ -1053,7 +1053,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         [&rasterizer](void* address, u64 value, u32 num_bytes) {
             const VAddr label = reinterpret_cast<VAddr>(address);
             // Only where GPU data may share the page (elsewhere the store does not fault on it;
-            // Uncharted 2 releases ~45k times a second, and the bookkeeping cost it 4%).
+            // A game may release ~45k times a second, and the bookkeeping cost it 4%).
             if (rasterizer.GetBufferCache().MayBeGpuWritten(label & ~VAddr{4095}, 4096)) {
                 rasterizer.NoteLabelWrite(label, num_bytes);
                 Gow3WriteLog::Note(label, &value, num_bytes, Gow3WriteLog::Fence);
@@ -1096,7 +1096,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }
     // A copy or fill into guest memory can be made there at once (CopyBuffer/FillBuffer's CPU
     // paths): like WriteData, not before the copies and fences deferred to the recording thread.
-    // Uncharted 2 with multithreaded rendering: a DMA-written frame marker overtook the deferred
+    // With multithreaded rendering a DMA-written frame marker overtook the deferred
     // end-of-pipe timestamp of that frame (assert m_gfxEopTick in FrameBegin).
     if (dma_data->dst_sel == DmaDataDst::Memory || dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
         rasterizer.WaitHostCopies();
@@ -1234,7 +1234,7 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
     // The deferred value counts as written: the GPU runs in stream order, so it would have written
     // the fence before reaching this wait. Safe because deferred fences complete in order (see
     // RunEventWriteEop). GOW3_DEFERRED_WAITS=land: the readback lands first instead (the GPU
-    // thread waits for the GPU: Uncharted 2 at 42 instead of 60 FPS).
+    // thread waits for the GPU: 42 instead of 60 FPS).
     static const bool pass = [] {
         const char* env = std::getenv("GOW3_DEFERRED_WAITS");
         return !(env && std::string_view{env} == "land");
@@ -2304,7 +2304,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // gow3: a fence handed to the draw recording thread counts as written: that
                 // thread runs everything in stream order.
                 // 18 Oct 2026 (GOW3_FEWER_DRAINS=1): checked before LandDeferredFenceFor, which
-                // drains the pipe first (8.7% of the U3 command thread on a Ryzen laptop). Off by
+                // drains the pipe first (8.7% of the command thread on a Ryzen laptop). Off by
                 // default: fewer drains made a readback race of multithreaded rendering frequent
                 // (see Rasterizer::WaitDrawPipeForCapture).
                 const auto pending_fence_met = [&] {
@@ -2538,11 +2538,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         // gow3: compute work uses the caches, so the draw recording thread runs dry first. Not for
         // no-ops and register writes (per-queue compute state, or SH registers the draw packets
         // snapshot) nor for dispatches (handed to that thread in stream order, or drained by
-        // DispatchDirect/Indirect themselves): Uncharted 2 drained ~900 times per frame here,
+        // DispatchDirect/Indirect themselves): a game drained ~900 times per frame here,
         // 20-25% of the command thread's time with multithreaded rendering.
         // 18 Oct 2026 (GOW3_FEWER_DRAINS=1): nor for nested buffers (their packets pass this
         // check one by one) and memory waits (they drain only while unmet, as on the graphics
-        // queue): compute drains were up to 35% of the command thread in Uncharted 3 on a Ryzen
+        // queue): compute drains were up to 35% of the command thread on a Ryzen
         // laptop. Off by default (see the graphics WaitRegMem).
         // 21 Oct 2026 (GOW3_SKIP_IB_DRAIN=1): nested buffers alone.
         const bool pipelined_wait =
@@ -2894,7 +2894,7 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     }
     // gow3 diagnostics (GOW3_SYNC_SUBMIT=1): the guest returns from the submission only once the
     // GPU command thread has processed it (at most 50 ms: the submission may wait for the guest),
-    // so the game never runs ahead of the port's processing (Uncharted 3's cloth flicker, 16 Oct).
+    // so the game never runs ahead of the port's processing (a cloth flicker, 16 Oct).
     static const bool sync_submit = [] {
         const char* env = std::getenv("GOW3_SYNC_SUBMIT");
         return env && env[0] == '1';

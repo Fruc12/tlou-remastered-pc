@@ -58,7 +58,7 @@ u32 DefaultWorkerCount() {
 
 /// gow3 21 Oct 2026 (GOW3_PREP_POOL=1, low-end CPUs): every submission allocated its command
 /// copy, its prepared-draw array (~1 KiB a draw) and a fresh 64 KiB chunk for the flattened user
-/// data (zeroed by the worker; Uncharted 3 has ~130 submissions a frame), and the GPU command
+/// data (zeroed by the worker; ~130 submissions a frame), and the GPU command
 /// thread freed them all when it collected the submission. On 4 desktop cores those frees were
 /// 10-13% of the command thread's busy time (RtlFreeHeap walking the heap's large-block free
 /// list, a cache miss per entry; pooling only the chunks moved the cost to the next large free,

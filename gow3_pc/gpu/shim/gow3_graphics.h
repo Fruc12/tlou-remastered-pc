@@ -15,10 +15,10 @@ inline constexpr std::array<std::string_view, DisplayModeCount> DisplayModeKeys 
 inline constexpr std::array<const char*, DisplayModeCount> DisplayModeNames = {
     "Windowed", "Borderless", "Fullscreen"};
 
-/// Present rate limits. Uncharted: at most 120; faster, movement timing breaks (Drake's
-/// Fortune at 140-160 FPS: running slows, Nate fell through the world).
+/// Present rate limits: at most 120; faster, movement timing broke in an earlier game of the
+/// engine (at 140-160 FPS running slowed and the player fell through the world).
 inline constexpr int MaxFpsLimit = 120;
-/// 40-55 for tests (Uncharted 3's cloth flickers at 60 FPS but not at 30, 16 Oct); 75, 90 and
+/// 40-55 for tests (a cloth flicker showed at 60 FPS but not at 30, 16 Oct); 75, 90 and
 /// 100 for displays with those refresh rates (and variable refresh).
 inline constexpr std::array<int, 10> FpsLimits = {30, 40, 45, 50, 55, 60, 75, 90, 100, MaxFpsLimit};
 

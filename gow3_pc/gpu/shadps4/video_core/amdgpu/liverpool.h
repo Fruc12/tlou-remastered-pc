@@ -198,7 +198,7 @@ public:
         }
     }
 
-    /// gow3 21 Oct 2026 (GOW3_WAIT_SERVICES_FAULTS=1, default off): Uncharted 2's guest threads
+    /// gow3 21 Oct 2026 (GOW3_WAIT_SERVICES_FAULTS=1, default off): a game's guest threads
     /// lost 20-38% of a thread in read faults (~10 ms each) whose requests waited in the command
     /// queue while the GPU command thread sat in the presenter's frames-ahead wait, which runs no
     /// commands. Fault requests (SendFaultCommand) then go into a queue of their own that

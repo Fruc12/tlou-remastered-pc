@@ -29,7 +29,7 @@ void BarrierTracker::InsertRange(const AddressRange& range, Access access_type) 
     u32 root_index = ComputeRootIndex(range, access_type);
     // gow3 17 Oct 2026: a range starting at most merge_gap bytes after an existing one extends it
     // (the gap counts as accessed) instead of adding a node. All guest buffers share one arena
-    // buffer, so its tree held every range accessed since the last barrier: Uncharted's effect
+    // buffer, so its tree held every range accessed since the last barrier: the effect
     // shader writes a record array per dispatch, 12 bytes after the previous one, ~1500 times a
     // frame, and without barriers between them the lookups took up to half of the GPU thread.
     // GOW3_TRACKER_MERGE_GAP=<bytes> (0: off).

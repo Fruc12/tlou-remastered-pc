@@ -68,7 +68,7 @@ static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
 static uint64_t table_generation;
 /* gow3 19 Oct 2026: time spent in guest memory maps, unmaps and releases, and waiting for the
- * region lock exclusively (U1: a second without frames before a cutscene while the game mapped
+ * region lock exclusively (a second without frames before a cutscene while the game mapped
  * ~100 1 MiB blocks). map_time_report prints when they took 20 ms or more since the last line. */
 static uint64_t mono_ns(void) {
 #ifdef _WIN32
@@ -271,7 +271,7 @@ static size_t carve_host_timed(uintptr_t a, uintptr_t b) {
 /* gow3 19 Oct 2026: a guest mapping is made of views of at most VIEW_CHUNK bytes, cut at
  * VIEW_CHUNK-aligned guest addresses. Windows only unmaps whole views: unmapping 1 MiB of a large
  * mapping (carve_host) unmapped all of it, mapped the rest again and restored every page's
- * protection, about 23 ms each time. Drake's Fortune unmaps ~100 1 MiB pieces before some
+ * protection, about 23 ms each time. A game that unmaps ~100 1 MiB pieces before some
  * cutscenes: a 1-1.8 s freeze. Now it touches at most the two chunks at the ends of the range.
  * Mappings whose address or offset is not 64 KiB aligned stay one view (view offsets must keep
  * the alignment Windows asks for). GOW3_VIEW_CHUNK_MB=0 maps every range as one view, as before. */
@@ -539,7 +539,7 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
     if (!alignment) alignment = PAGE;
     if (!out || low < 0 || high < 0 || !size || size % PAGE || !valid_alignment(alignment) || type < 0 || type > 10)
         return INVALID;
-    /* Uncharted searches up to the retail pool size (5056 MiB); a raised pool (GOW3_DMEM_MB, the
+    /* Games search up to the retail pool size (5056 MiB); a raised pool (GOW3_DMEM_MB, the
      * render resolution patch) extends that search. */
     if ((uint64_t)high >= UINT64_C(5056) * 1024 * 1024 && (uint64_t)high < POOL_SIZE) high = (int64_t)POOL_SIZE;
     uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE;
@@ -755,8 +755,8 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
     start&=~(uintptr_t)(PAGE-1);
     if ((prot & ~0x37) || !covered(start,end,0)) return INVALID;
     /* An unchanged protection is a no-op: the host pages keep their GPU-tracking protection and
-     * the GPU caches stay valid. Uncharted re-protects ranges several times per frame; each
-     * invalidation downloaded GPU-written data with a full GPU wait (temple: ~47% of frame time). */
+     * the GPU caches stay valid. A game may re-protect ranges several times per frame; each
+     * invalidation downloaded GPU-written data with a full GPU wait (up to ~47% of frame time). */
     int unchanged=1, old_prot=-1;
     for (size_t j=vma_index(start); j<vma_count && vmas[j].start<end; ++j) {
         if (old_prot<0) old_prot=vmas[j].prot;
@@ -898,8 +898,8 @@ uintptr_t runtime_memory_resolve(const char *name) {
 }
 /* Guest memory for the GPU library's own data (movie frames scaled to the display size,
  * gpu/shim/gow3_movie.cpp): flexible memory, CPU and GPU read/write. Placed high: games claim
- * virtual ranges from 0x1000000000 up without reserving them (Uncharted's memory areas, whose
- * freed pages leave holes that look free here). */
+ * virtual ranges from 0x1000000000 up without reserving them (their memory areas, whose freed
+ * pages leave holes that look free here). */
 void *runtime_map_guest_memory(uint64_t size) {
     void *address=(void *)UINT64_C(0xf000000000);
     return map_flexible(&address,align_up(size,PAGE),0x33,0)==0 ? address : NULL;
@@ -981,7 +981,7 @@ void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalid
 }
 /* The region cache (below): backing reads and writes inside one cached mapping take no lock. The
  * GPU thread copies through the backing view for every upload and every landed readback; the
- * read-write lock there cost Uncharted 2 ~15% of the GPU thread (winpthreads, 16 Oct). */
+ * read-write lock there cost ~15% of the GPU thread (winpthreads, 16 Oct). */
 static const void *cached_backing(uintptr_t address, uint64_t size);
 static void cache_region(size_t i);
 /* Writes through the backing view; 0 when part of the range has no backing. */
@@ -1019,7 +1019,7 @@ int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) {
 /* GPU uploads (CopySparseMemory): copies guest memory through the backing view and zero-fills
  * unmapped parts. The GPU thread copies while it holds the buffer tracker's locks; through the
  * guest view, a page read-protected for an async readback (GOW3_ASYNC_READBACK=1) faulted into a
- * handler that needs the same locks (Uncharted 3 hung while loading, 16 Oct). An upload copies
+ * handler that needs the same locks (a game hung while loading, 16 Oct). An upload copies
  * CPU-written bytes only, so it never needs to wait for a readback's GPU bytes. */
 void runtime_memory_copy_backing(uintptr_t address, void *dest, uint64_t size) {
     unsigned char *out=dest;

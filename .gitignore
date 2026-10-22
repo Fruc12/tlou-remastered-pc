@@ -5,9 +5,6 @@
 /dist/
 *.pkg
 /analysis/*
-!/analysis/STATUS.md
-!/analysis/PLAN.md
 /gow3_pc/out/
-/Uncharted.lnk
 __pycache__/
 *.pyc

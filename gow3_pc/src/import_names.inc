@@ -781,7 +781,7 @@
 {"iKJMWrAumPE#libkernel","getargc"},
 {"FJmglmTMdr4#libkernel","getargv"},
 {"QKd0qM58Qes#libkernel","sceKernelStopUnloadModule"},
-/* Uncharted imports, verified against upstream shadPS4 kernel/fiber definitions. */
+/* Kernel and fiber imports, verified against upstream shadPS4 definitions. */
 {"DGMG3JshrZU#libkernel","sceKernelSetVirtualRangeName"},
 {"mkgXxsoxWHg#libkernel","sceKernelClearVirtualRangeName"},
 {"asjUJJ+aa8s#libSceFiber","sceFiberOptParamInitialize"},
@@ -810,8 +810,8 @@
 {"uHtKS5V1T5k#libSceNpTus","sceNpTusGetDataAsync"},
 {"G68xdfQuiyU#libSceNpTus","sceNpTusSetDataAsync"},
 {"BIkMmUfNKWM#libSceNpTus","sceNpTusCreateNpTitleCtx"},
-/* Uncharted 2 and 3 (big2/big3-ps4_Shipping.elf): POSIX imports through libScePosix
- * (canonicalized to libkernel), the menu's executable switch and a few NP calls. */
+/* POSIX imports through libScePosix (canonicalized to libkernel), the executable switch and a
+ * few NP calls. */
 {"wuCroIGjt2g#libkernel","open"},
 {"AqBioC2vF3I#libkernel","read"},
 {"FN4gaPmuFV8#libkernel","write"},

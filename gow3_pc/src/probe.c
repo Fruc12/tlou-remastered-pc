@@ -335,7 +335,7 @@ static void poll_exec_watch_file(void) {
     fflush(stdout);
 }
 /* GOW3_POKE=<entry>[,<entry>...]: bytes the runtime keeps set in guest memory, rewritten every
- * 250 ms (launcher cheats: the games' own debug-menu switches, tools/probe_uncharted.py CHEATS).
+ * 250 ms (cheats: the game's own debug-menu switches).
  * An entry is <offset>[=<value>] (hex guest image offset, value 1 by default) or
  * *<offset>+<add>[=<value>] (the byte <add> past the pointer stored at <offset>). Reads and
  * writes go through Read/WriteProcessMemory: an address not mapped (yet) is skipped. */
@@ -392,7 +392,7 @@ static void start_exec_watch(void) {
     WaitForSingleObject(exec_watch_ready,5000);
     printf("Exec watch: %d breakpoints armed from %s\n",exec_watch_count,env ? env : "(file)");
 }
-/* GitHub #22 (18 Oct 2026, Windows 10 19041, all three games at start): the games run their job
+/* GitHub #22 (18 Oct 2026, Windows 10 19041, at start): the games run their job
  * code on PS4 fibers whose stacks lie in guest memory (gow3_fiber.cpp), outside the stack the
  * thread's TEB names. Resuming from any exception there, ntdll's RtlGuardRestoreContext ended the
  * process (FAST_FAIL_INVALID_SET_OF_CONTEXT: the context's rsp outside the TEB stack). The TEB now
@@ -411,7 +411,7 @@ static void cover_current_stack(const CONTEXT *context) {
     }
     /* gow3 19 Oct 2026: a stack in guest memory is bounded by its guest mapping. runtime_memory.c
      * maps large ranges as several views of at most 2 MiB, so a Windows allocation no longer spans
-     * a mapping: limits taken from it cut fiber stacks that cross a view, and Uncharted 3 stopped
+     * a mapping: limits taken from it cut fiber stacks that cross a view, and a game stopped
      * at start ("fiber stack overflow"). Other stacks: their Windows allocation, as before. */
     uintptr_t guest_start, guest_end;
     int guest_mapped;
@@ -460,12 +460,12 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
         }
         /* GPU page tracking (write-protected guest pages) is resolved first, except during a
          * speculative read (draw preparation workers): resolving a GPU-modified page there waits
-         * for the GPU thread, which may be waiting for a lock that worker holds (Uncharted 2
+         * for the GPU thread, which may be waiting for a lock that worker holds (seen in a
          * level load). Such a fault takes the recovery path; the GPU thread does that draw. */
         if (gpu_enabled && !runtime_fault_recover) {
             /* A fault inside the GPU fault handlers is legitimate a level or two deep (a handler
              * touching another tracked page). A bug there recursed until the thread's stack ran
-             * out and the game froze for good (18 Oct 2026, Uncharted 3: the page table indexed
+             * out and the game froze for good (18 Oct 2026: the page table indexed
              * with a garbage address, thousands of levels). Deeper than 8: a report, and stop. */
             static _Thread_local int handler_depth;
             if (handler_depth>=8) {
@@ -975,8 +975,8 @@ int main(int argc, char **argv) {
     runtime_thread_tcb_offset();
 #endif
     int cpu_only = 0, strict_imports = 0, check_imports = 0, game_hooks = 1, low_image = 0;
-    /* Guest argv: --guest-path is argv[0], then --guest-arg values. The Collection menu's
-     * LoadExec argv for Uncharted 2/3 is the complete argv: "eboot.bin" "ispartofuccollection". */
+    /* Guest argv: --guest-path is argv[0], then --guest-arg values (a LoadExec handoff passes the
+     * new program's complete argv). */
     const char *guest_argv[17]={"/app0/eboot.bin"};
     int guest_argc=1;
     unsigned timeout_seconds = 10;
@@ -1168,7 +1168,7 @@ int main(int argc, char **argv) {
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {
-        char title[128]="Uncharted: The Nathan Drake Collection", serial[16]="UNKNOWN", sfo[4096];
+        char title[128]="The Last of Us Remastered", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
         if (!app0 || runtime_file_translate("/app0/sce_sys/param.sfo",sfo,sizeof(sfo))) snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);

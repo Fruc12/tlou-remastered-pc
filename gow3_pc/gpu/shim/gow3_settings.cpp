@@ -452,7 +452,7 @@ void Save() {
     // overwritten with the game's older value, e.g. a 165 FPS limit after choosing 60).
     const KeyValues ours = Current();
     const KeyValues file_values = ReadFile();
-    std::string text = "# Uncharted settings (launcher and in-game menu: Insert / R3+L2)\n";
+    std::string text = "# The Last of Us Remastered settings (in-game menu: Insert / R3+L2)\n";
     for (const auto& [key, value] : ours) {
         const std::string* base = Find(synced, key);
         const std::string* theirs = Find(file_values, key);

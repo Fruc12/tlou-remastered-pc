@@ -101,7 +101,7 @@ public:
         return graphics_queue;
     }
 
-    /// gow3 (Supermedo/uncharted_pc #94): the queue sparse binds go to; the graphics queue when
+    /// gow3: the queue sparse binds go to; the graphics queue when
     /// its family supports them (NVIDIA, AMD on Windows), else one of a family that does (RADV).
     vk::Queue GetSparseQueue() const {
         return sparse_queue;

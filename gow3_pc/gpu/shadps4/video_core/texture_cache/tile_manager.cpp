@@ -197,7 +197,7 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
 void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,
                                        const vk::DescriptorBufferInfo& linear,
                                        const vk::DescriptorBufferInfo& params, u32 dim_x) {
-    // gow3 19 Oct 2026, from Supermedo/uncharted_pc #94: large textures need more work groups
+    // gow3 19 Oct 2026: large textures need more work groups
     // than a dispatch may have on some GPUs (Vulkan guarantees 65535; RADV, Intel); they are
     // dispatched in pieces, each starting at its first group (the shader sees the same
     // gl_GlobalInvocationID as in one dispatch). Within the limit: one dispatch, as before.

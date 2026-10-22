@@ -198,7 +198,7 @@ std::vector<std::pair<VAddr, u64>> TextureCache::TakeTinyReadbacks() {
 // (marked GPU-written there), and the range joins the end-of-pipe readbacks of the rasterizer
 // (Rasterizer::ReadBackEopResults, unprotected): the fence after it is written once the bytes
 // are in guest memory. Landing on its own after the fence (the first version), a copy could
-// overwrite memory the game had already reused after seeing that fence (U2 asserted
+// overwrite memory the game had already reused after seeing that fence (the game asserted
 // m_gfxEopTick after skipping a movie).
 void TextureCache::ProcessTinyReadbacks() {
     if (!tiny_readbacks) {
@@ -1320,7 +1320,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     if (desc.info.stencil_addr != 0) {
         // Only an 8-bit image (or the format-less placeholder created below) stands for the
         // stencil plane. Games reuse memory: a color texture that later starts at this address
-        // must not be redirected to the depth-stencil image (Uncharted: an RGBA8 960x540
+        // must not be redirected to the depth-stencil image (an RGBA8 960x540
         // texture sampled as the D32S8 buffer read past its memory, GPU page fault).
         const ImageId depth_id = image_id;
         ImageId stencil_id{};
@@ -1341,7 +1341,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             RegisterImage(stencil_id);
         }
         // gow3 18 Oct 2026: the insert above moves every image when the slot vector grows
-        // (Reserve), so `image` may point into freed memory: fetched again (the user's U2 crash
+        // (Reserve), so `image` may point into freed memory: fetched again (a user's crash
         // after 38 minutes, a read of image_uid here).
         Image& depth_image = slot_images[image_id];
         Image& stencil_image = slot_images[stencil_id];
@@ -1698,7 +1698,7 @@ void TextureCache::GarbageCollectImages() {
         // GOW3_GC_BUDGET_MB=N: this rule with a fixed budget on any GPU (tests on a desktop).
         // gow3: discrete GPUs use it too (18 Oct, RTX 5060 Laptop, 8 GB): the startup rule put
         // the pressure mark at 40% of an 8 GB budget (2495 of ~6240 MiB) and the usage counts
-        // the buffer arenas in device-local memory, so U2 at ~3 GB evicted up to 500 images per
+        // the buffer arenas in device-local memory, so a game at ~3 GB evicted up to 500 images per
         // 5 s and re-registered ~200 of them (~225 MB of uploads) in one frame every ~15 s
         // (75-80 ms frames). GOW3_GC_STARTUP_RULE=1: the startup rule on discrete GPUs again.
         static const u64 forced_budget = [] {

@@ -154,10 +154,10 @@ static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
 // gow3 17 Oct 2026: merge blocks of the ifs and loops whose body already holds one of the
 // game's own barriers (s_barrier). The game runs those barriers in every wave, so the conditions
 // around them are uniform across the group however they are computed (a loop exit read from LDS
-// after a reduction). Uncharted 3's cloth solver: its convergence loop re-wrote lds[0] at the top
+// after a reduction). A cloth solver: its convergence loop re-wrote lds[0] at the top
 // of the next iteration while slower warps still read the previous sum at the bottom; the loop
-// counted as divergent (LDS-read exit), so no barrier went between them and Sully's shirt still
-// exploded now and then while he walked.
+// counted as divergent (LDS-read exit), so no barrier went between them and the cloth still
+// exploded now and then while its character walked.
 static NodeSet FindBarrierRegions(const IR::AbstractSyntaxList& syntax_list) {
     using Type = IR::AbstractSyntaxNode::Type;
     NodeSet regions;
@@ -225,7 +225,7 @@ static NodeSet FindDivergentLoops(const IR::AbstractSyntaxList& syntax_list, boo
 
 // GCN waves run in lockstep, so games load from a buffer what another invocation of the wave
 // stored without a barrier. Inserts one after such stores. (shadPS4 PR #5310; gow3 16 Oct 2026:
-// Uncharted 3's objects flickered as flat-coloured shapes on NVIDIA, 32-lane subgroups, and not
+// Objects flickered as flat-coloured shapes on NVIDIA, 32-lane subgroups, and not
 // on an AMD GPU, which runs these shaders with 64 lanes.)
 static void EmitBufferBarriers(IR::Program& program) {
     using Type = IR::AbstractSyntaxNode::Type;
@@ -293,17 +293,17 @@ static constexpr u32 GcnSubgroupSize = 64;
 
 // gow3 17 Oct 2026: GCN shaders with groups of several 64-lane waves still pass data through LDS
 // inside one wave without a barrier (the wave runs in lockstep). With 32-lane subgroups (NVIDIA)
-// the two halves of such a wave are separate warps and race: Uncharted 3's cloth solver
-// (cs 1c957b01, 1024 threads, warp-synchronous reductions) blew up Sully's shirt into flat
+// the two halves of such a wave are separate warps and race: a cloth solver
+// (cs 1c957b01, 1024 threads, warp-synchronous reductions) blew up a character's shirt into flat
 // triangles on every other frame at 60 FPS (2 sub-steps), never on an AMD GPU (wave64).
 // GOW3_LDS_BARRIERS_MULTIWAVE: unset = the shaders below, 0 = none, 1 = every multi-wave compute
-// shader (Uncharted 3 ran clean with it; not tested in 1 and 2), or hex hashes separated by commas.
+// shader (not tested in The Last of Us Remastered), or hex hashes separated by commas.
 bool MultiwaveLdsBarriers(u64 pgm_hash) {
     static const std::vector<u64> hashes = [] {
         std::vector<u64> list;
         const char* env = std::getenv("GOW3_LDS_BARRIERS_MULTIWAVE");
         if (!env) {
-            // Uncharted 3's two cloth solvers (Sully's shirt): 1024- and 128-thread groups.
+            // Two cloth solvers: 1024- and 128-thread groups.
             return std::vector<u64>{0x1c957b01ULL, 0x809864d3ULL};
         }
         if (env[0] == '1' && env[1] == 0) {
@@ -360,7 +360,7 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     const u32 shared_memory_size = cs_info.shared_memory_size;
     const u32 threadgroup_size =
         cs_info.workgroup_size[0] * cs_info.workgroup_size[1] * cs_info.workgroup_size[2];
-    // Opt-in while untested in Uncharted 1/2 (it did not fix Uncharted 3's flicker). Cached
+    // Opt-in while untested (it did not fix a cloth flicker). Cached
     // shaders do not record the switch: clear the pipeline cache when changing it.
     static const bool buffer_barriers = [] {
         const char* env = std::getenv("GOW3_WAVE_BUFFER_BARRIERS");

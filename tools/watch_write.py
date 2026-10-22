@@ -3,7 +3,7 @@
   python -I tools/watch_write.py <addr> [addr ...]   up to 4 guest addresses, 4-byte write watch
   python -I tools/watch_write.py clear
 
-Hits are logged by the runtime ("Watch:" lines in analysis/uncharted/boot.log, at most 400).
+Hits are logged by the runtime ("Watch:" lines in analysis/tlou/boot.log, at most 400).
 Each thread is suspended only while its debug registers are set, and always resumed.
 """
 import ctypes as c

@@ -16,7 +16,7 @@ namespace {
 // depth first and then shade with depth test EQUAL, which needs every vertex shader to compute
 // the same position bit for bit. SPIR-V promises that only for outputs decorated Invariant (DXVK
 // decorates all D3D positions). Adds the decoration to every output variable that is the Position
-// built-in, also in SPIR-V cached by earlier builds. It did not change the Uncharted 3 museum's
+// built-in, also in SPIR-V cached by earlier builds. It did not change a
 // red floor (a cached binary paired with another permutation's description, see
 // vk_pipeline_serialization.cpp BinaryMatchesMeta), so it stays opt-in.
 constexpr u32 OpVariable = 59;

@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import time
 
-PAD = Path(__file__).resolve().parent.parent / "analysis/uncharted-user/probe-pad.txt"
+PAD = Path(__file__).resolve().parent.parent / "analysis/tlou-user/probe-pad.txt"
 
 
 class GameClosed(Exception):

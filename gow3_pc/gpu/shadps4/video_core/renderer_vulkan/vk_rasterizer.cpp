@@ -58,7 +58,7 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
 extern "C" void runtime_exec_watch_retarget(uint64_t address);
 namespace {
 // gow3 16 Oct: a depth image sampled by a draw that also has it as its depth attachment
-// (Uncharted 3's half-resolution depth, 960x540 D32S8, with depth writes on) used to be bound as
+// (a half-resolution depth, 960x540 D32S8, with depth writes on) used to be bound as
 // a texture in DepthStencilReadOnlyOptimal and then moved to the attachment layout before the
 // render pass: the descriptor named a stale layout and every such draw had two transitions
 // (Vulkan synchronization validation: write-after-write and read-after-write hazards). On NVIDIA
@@ -71,8 +71,8 @@ constexpr vk::PipelineStageFlags2 DepthFeedbackStages =
 constexpr vk::AccessFlags2 DepthFeedbackAccess = vk::AccessFlagBits2::eShaderRead |
                                                  vk::AccessFlagBits2::eDepthStencilAttachmentRead |
                                                  vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
-// Opt-in (GOW3_DEPTH_FEEDBACK_GENERAL=1) until tested in Uncharted 1 and 2; it removed the
-// validation hazards in Uncharted 3 but not its flicker.
+// Opt-in (GOW3_DEPTH_FEEDBACK_GENERAL=1) until tested more widely; it removed the validation
+// hazards it was made for but not a flicker.
 bool DepthFeedbackGeneral() {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_DEPTH_FEEDBACK_GENERAL");
@@ -196,14 +196,14 @@ inline AmdGpu::CbDbExtent Rasterizer::DbExtent() const {
 }
 
 namespace {
-// gow3 16 Oct: late constants (GOW3_LATE_CONSTANTS=1). Uncharted 3 fills some per-object constants
+// gow3 16 Oct: late constants (GOW3_LATE_CONSTANTS=1). A game may fill some per-object constants
 // after it submitted the draws that read them: a PS4 GPU reads them when it runs the draw, here
 // they were copied when the draw was processed. About 0.7% of resource-table walks read zeros the
 // game replaced before the submission (GOW3_SRT_CHECK), and objects flickered as flat-coloured
 // shapes. Constant copies and flattened resource tables made for the GPU are compared with guest
 // memory right before their command buffer is submitted, and refreshed where the game changed them.
-// gow3 21 Oct 2026: made cheap enough for multithreaded rendering (Uncharted 2 needs it there:
-// Drake, his gun and train cars drew flat white for single frames). Before, every copy took one
+// gow3 21 Oct 2026: made cheap enough for multithreaded rendering (needed there:
+// characters, weapons and vehicles drew flat white for single frames). Before, every copy took one
 // global lock and allocated a copy of its user data, and at each submission the submitting thread
 // (the draw recording thread, which limits the frame rate with multithreaded rendering) copied
 // every source again and compared it with the copy, ~2 million copies per 5 s, ~0.05% changed.
@@ -609,7 +609,7 @@ struct SrtWalkCheck {
     std::vector<u32> user_data;
     std::vector<u32> flat;
     s64 walk_ns;
-    // gow3 21 Oct 2026 (U3 museum red carpet): who walked (a draw-preparation worker walks ahead
+    // gow3 21 Oct 2026 (a missing carpet): who walked (a draw-preparation worker walks ahead
     // of the GPU thread, and the GPU thread walks again and compares) and, for the GPU thread,
     // the draw: a late table only matters when the walk the GPU uses read it.
     bool worker;
@@ -790,7 +790,7 @@ void CheckSrtWalks() {
 }
 
 /// gow3: compute shaders whose output the guest reads as soon as the next end-of-pipe event
-/// fires (Rasterizer::eop_readbacks): Uncharted 1's Cs_RayTraceGatherHits (the closest hit of
+/// fires (Rasterizer::eop_readbacks): the engine's Cs_RayTraceGatherHits (the closest hit of
 /// each mesh ray cast).
 /// GOW3_EOP_READBACK: 0 off, 1 (default) asynchronous with the pages read-protected, 2 waiting
 /// for the GPU at the event (diagnostics).
@@ -802,10 +802,10 @@ int EopReadbackMode() {
     return mode;
 }
 
-/// gow3 16 Oct: Uncharted 2's 64-wide copy shader (6a6422a9, run on the GPU: its sources are
+/// gow3 16 Oct: the engine's 64-wide copy shader (6a6422a9, run on the GPU: its sources are
 /// completed after the frame is queued) writes data the game reads back on the CPU (one value
 /// in a 1 KiB block it rewrites every frame). Read back with the submission, that block counted
-/// as recurring (readable, a frame old): NPCs floated in the air and Nate sank into the floor,
+/// as recurring (readable, a frame old): NPCs floated in the air and the player sank into the floor,
 /// fixed by precise readbacks at ~50 FPS. As an end-of-pipe readback the fence after it waits
 /// for it. GOW3_COPY64_EOP_READBACK=1.
 bool Copy64EopReadback() {
@@ -821,7 +821,7 @@ bool IsEopReadbackShader(u64 hash) {
            EopReadbackMode() != 0;
 }
 
-/// gow3: a T# that passes the format check but cannot be a real texture: Uncharted 2's treasure
+/// gow3: a T# that passes the format check but cannot be a real texture: the treasure
 /// effects fetch T#s from resource table slots that hold other data (CPU-written; the shader
 /// branches using them are not taken). Built, such an image spans gigabytes or reaches past
 /// mapped memory (tracked, uploaded, out of device memory) or has reserved swizzles.
@@ -843,7 +843,7 @@ bool PlausibleTSharp(const AmdGpu::Image& tsharp) {
 /// gow3 20 Oct 2026 (GitHub #63): the host image a description would create, roughly (all
 /// layers and slices of the first level, a third more with mips), and its layer count against
 /// the device's limit. Garbage descriptions make images of gigabytes: one of 960x540 RGBA8 with
-/// 6772 layers (16 GB) took all video memory and the next allocation stopped Drake's Fortune.
+/// 6772 layers (16 GB) took all video memory and the next allocation stopped the game.
 bool PlausibleHostImage(const VideoCore::ImageInfo& info, u32 max_layers) {
     if (info.resources.layers == 0 || info.resources.layers > max_layers) {
         return false;
@@ -883,7 +883,7 @@ bool PlausibleTarget(const VideoCore::ImageInfo& info, u32 max_layers, const cha
 
 /// gow3 test (21 Oct 2026): GOW3_TEST_GARBAGE_TSHARP=<seconds>[,<count>]. After <seconds> from
 /// the first texture bind, the next <count> T#s (default 600) become the garbage one that stopped
-/// Uncharted 2 on a laptop (BC2, number format 13, a macro-tiled mode; image_info.cpp UpdateSize
+/// A game on a laptop (BC2, number format 13, a macro-tiled mode; image_info.cpp UpdateSize
 /// asserted), to check that such a T# is dropped. Off by default.
 void TestGarbageTSharp(AmdGpu::Image& tsharp) {
     struct Params {
@@ -1115,8 +1115,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     if (gbuffer_draw) {
         camera_motion->OnGBufferPass(db_desc.first);
     } else if (camera_motion->VelocityMode() && db_desc.first && !camera_motion->Depth()) {
-        // Uncharted: no G-buffer of 5 targets. The frame's first pass at the render size that is
-        // depth-only (U1's prepass) or draws RGBA16F color (U2's first scene pass) holds the scene
+        // Without a G-buffer of 5 targets, the frame's first pass at the render size that is
+        // depth-only (a prepass) or draws RGBA16F color (a first scene pass) holds the scene
         // depth (after the reference port; the size is the patched render size, ultrawide too).
         const auto& depth = texture_cache.GetImage(db_desc.first);
         const auto [scene_w, scene_h] = camera_motion->SceneSize();
@@ -1306,9 +1306,9 @@ bool Rasterizer::IsGpuSideThreadId(u32 tid) const {
 }
 
 namespace {
-// gow3 21 Oct 2026: stale per-object constants with multithreaded rendering (Uncharted 2: Drake,
-// his gun, enemies and train cars drawn flat white for single frames; Drake's Fortune: flat grey
-// weapons, GitHub #23). The games write those constants with the GPU command stream itself: cs
+// gow3 21 Oct 2026: stale per-object constants with multithreaded rendering (characters,
+// weapons, enemies and vehicles drawn flat white or grey for single frames). The engine writes
+// those constants with the GPU command stream itself: cs
 // 2d215c3b copies them into the frame's constant area (~250-300 dispatches a frame in combat),
 // and the next draws read them through their resource tables. The copy runs on the CPU
 // (vk_shader_hle.cpp ExecuteScalarCopyHLE), in stream order on one thread when single-threaded;
@@ -1333,8 +1333,8 @@ bool PipeWriteEnd() {
 /// the copy shaders queued before the draw that write into them (SyncSrtTables; only GPU-written
 /// tables were synced, pending writes guarded ring copies but never walks). Only the copy
 /// shaders' destinations are checked (pending_copy_writes, a few merged ranges): checking every
-/// pending write per walk cost Uncharted 3's crowd scene (~1,500 writing dispatches a frame)
-/// 60 -> 46 FPS on the GPU command thread. U2 at a stage B slowed to a laptop's pace
+/// pending write per walk cost a crowd scene (~1,500 writing dispatches a frame)
+/// 60 -> 46 FPS on the GPU command thread. A stage B slowed to a laptop's pace
 /// (GOW3_TEST_PIPE_DELAY_NS=2000): 6 white flashes in 535 frames -> 0, 25-48 walks a second
 /// wait. 1 (default): wait until stage B has run the packets writing the table; 2: the same, and
 /// report what the wait changed (per shader, 5 s).
@@ -2002,7 +2002,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
     }
     if (!pipeline) {
-        // gow3 21 Oct 2026 (Uncharted 3 museum: a carpet never drawn, the scene's background red
+        // gow3 21 Oct 2026 (a carpet never drawn, the scene's background red
         // through it): which draws find no pipeline, by their stage programs, per 5 s.
         static std::unordered_map<u64, u32> dropped;
         static auto dropped_report = std::chrono::steady_clock::now();
@@ -2041,7 +2041,7 @@ namespace {
 /// Diagnostics: GOW3_SKIP_FILE=<file> lists shader hashes (hex, whitespace separated); draws
 /// and dispatches using one are skipped. Re-read when the file changes, so shaders can be
 /// switched off while the game runs.
-/// gow3 21 Oct 2026 (U3 museum red carpet): values above 32 bits are index buffer addresses
+/// gow3 21 Oct 2026 (a missing carpet): values above 32 bits are index buffer addresses
 /// (frame capture "mesh" lines); then only draws of those meshes are skipped, and only those using
 /// a listed shader when shaders are listed too (one mesh in one pass).
 bool SkippedShader(u64 first, u64 second = 0, u64 index_base = 0) {
@@ -2087,11 +2087,11 @@ bool SkippedShader(u64 first, u64 second = 0, u64 index_base = 0) {
 }
 } // namespace
 
-// gow3 19 Oct 2026, from Supermedo/uncharted_pc #261 (kj2223): GOW3_JITTER_PS=<pixel shader
-// hash>,... (tools/probe_uncharted.py: f614041e): full-screen passes that rebuild positions from
+// gow3 19 Oct 2026 (kj2223): GOW3_JITTER_PS=<pixel shader
+// hash>,...: full-screen passes that rebuild positions from
 // the scene depth through an interpolated texture coordinate get the same jitter as the scene
 // geometry. Unjittered, they rebuilt each pixel from depth rendered half a pixel away: the sun
-// shadow pass (f614041e, shared by the three games) moved against the geometry with every jitter
+// shadow pass (f614041e) moved against the geometry with every jitter
 // step and its shadows flickered under TAA, FSR and DLAA.
 static bool JitterFullScreenPass(u64 hash) {
     static const std::vector<u64> listed = [] {
@@ -2122,7 +2122,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     scheduler.Checkpoint("draw",pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
                          fragment ? fragment->pgm_hash : 0);
-    // gow3 21 Oct 2026 diagnostics (U3 museum red carpet), GOW3_MESH_DUMP=<index buffer hex>:
+    // gow3 21 Oct 2026 diagnostics (a missing carpet), GOW3_MESH_DUMP=<index buffer hex>:
     // for draws of that mesh, the vertex shader's user data and the 16 dwords behind each
     // pointer of its resource table (as floats), once per vertex shader every 10 s, to compare
     // the matrices the depth pass and the shading passes read.
@@ -2228,12 +2228,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_targets->debug = scene_debug_frame;
     };
     // gow3: the pass copying a finished frame to a display buffer; the previous draw's
-    // target is that frame. 19 Oct 2026, from Supermedo/uncharted_pc #261 (kj2223): Uncharted
-    // draws twice into the same display buffer per frame (484cdbf5, then 749bbec9; measured 2
+    // target is that frame. 19 Oct 2026 (kj2223): a game may
+    // draw twice into the same display buffer per frame (484cdbf5, then 749bbec9; measured 2
     // frame starts per shown frame): only the first starts a frame. The second reset the
     // upscaler's history every frame (shimmer on every edge under TAA, FSR and DLAA) and
     // skipped every other jitter phase. Toggle 1 << 59 brings the old behaviour back.
-    // Below the output size Uncharted's frames start at the upscale instead
+    // Below the output size such frames start at the upscale instead
     // (TemporalUpscaler::OnComposite): its finished frame, the copy back and the HUD are
     // several draws into the display buffer.
     if (camera_motion->Enabled() && !upscaler->CompositeFrames() && regs.color_buffers[0] &&
@@ -2243,7 +2243,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         frame_display_address = regs.color_buffers[0].Address();
         frame_start();
     }
-    // gow3: without camera motion (Uncharted) the GPU profiler marks frames at the display pass
+    // gow3: without camera motion the GPU profiler marks frames at the display pass
     // too. Its results are read with a wait four frames later, so everything recorded so far is
     // submitted first (a wait on unsubmitted timestamps hung the menu).
     else if (!camera_motion->Enabled() && GpuProfiler::Get() && regs.color_buffers[0] &&
@@ -2318,12 +2318,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
     push_data.yoffset *= target_scale[1];
-    // Uncharted: the animated draws of its G-buffer passes are the skinned ones, whose vertex
+    // The animated draws of the G-buffer passes are the skinned ones, whose vertex
     // buffers the GPU wrote this session (the skinning compute; the level's vertices stay as
     // loaded). Its shaders read vertices from buffers (no vertex inputs): the draw's identity
     // across frames comes from those buffers' sizes and strides, not their addresses (skinned
     // vertices can move between frames). (The stencil's character bit differs between the
-    // games: Uncharted 2 sets it on the whole level.)
+    // games: one sets it on the whole level.)
     bool character_draw = false;
     if (motion_draw && Shader::MotionVectors::stencil_gate) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
@@ -2474,7 +2474,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             draw();
         }
     });
-    // gow3: the camera of the game's velocity pass (GOW3_VELOCITY_PS, Uncharted): its constant
+    // gow3: the camera of the game's velocity pass (GOW3_VELOCITY_PS): its constant
     // buffer, as this draw reads it, for the upscaler's motion vectors.
     if (camera_motion->VelocityMode()) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
@@ -2516,7 +2516,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                       u32(effective.stencil_test_enable));
         FrameCapture::Note(depth_note);
         {
-            // gow3 21 Oct 2026 (U3 museum red carpet): the mesh of each draw (index buffer, first
+            // gow3 21 Oct 2026 (a missing carpet): the mesh of each draw (index buffer, first
             // index, count, base vertex, instances), to pair a depth-pass draw with the material
             // pass draw of the same mesh and with GOW3_SRT_CHECK lines.
             char mesh_note[160];
@@ -2729,7 +2729,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 }
 
 // gow3 diagnostics (GOW3_FULL_BARRIERS=1): a full memory and execution barrier before every
-// compute dispatch (all earlier GPU work done and visible). Uncharted 3's cloth flicker shows only
+// compute dispatch (all earlier GPU work done and visible). A cloth flicker showed only
 // above 30 FPS: a missing read-before-write dependency between a draw and the next frame's cloth
 // dispatch would only bite when the two are recorded back to back (16 Oct).
 static u64 g_cloth_dispatches = 0; ///< GOW3_CLOTH_PEEK dispatch numbers
@@ -2853,7 +2853,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     }
 
     // gow3 diagnostics (GOW3_TRACKER_CAP=<n>): a barrier before a dispatch once the barrier
-    // tracker holds n ranges (it is emptied by barriers only). Off: 1024 cost Uncharted 3's
+    // tracker holds n ranges (it is emptied by barriers only). Off: 1024 cost a
     // crowded street at 4K 48 -> 39 FPS (draws keep it above the cap, a barrier per dispatch).
     {
         static const size_t cap = [] {
@@ -2879,8 +2879,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     // push constants and descriptors was recorded since, in the same command buffer (the
     // scheduler's record serial: every Record() and CommandBuffer() call, and every new command
     // buffer, advance it; any other compute bind goes through one of them). Only while Vulkan
-    // commands are recorded on this thread (no recording thread, no draw pipeline). Uncharted 3
-    // dispatches ~1,275 times a frame, mostly the same few shaders back to back; on the
+    // commands are recorded on this thread (no recording thread, no draw pipeline). A game may
+    // dispatch ~1,275 times a frame, mostly the same few shaders back to back; on the
     // laptop (Ryzen 7840HS, 47 FPS, the GPU command thread CPU-bound) the driver's
     // vkCmdBindPipeline was 2.4% of that thread and vkCmdDispatch 4.3% (together 0.6% on the
     // Radeon 780M).
@@ -3075,17 +3075,17 @@ void Rasterizer::OnSubmit() {
     }
 }
 
-// gow3: Uncharted writes per-object constants with a GPU copy shader (2d215c3b) and its draws read
+// gow3: the engine writes per-object constants with a GPU copy shader (2d215c3b) and its draws read
 // them through SRT pointers, which the CPU-side walker flattens from guest memory. With Relaxed
 // readbacks those GPU writes reach guest memory only when the CPU later writes the same page, so
-// the walker kept reading zeros (ground missing, Nate unlit until a menu happened to touch the
+// the walker kept reading zeros (ground missing, characters unlit until a menu happened to touch the
 // page). GOW3_SYNC_GPU_CONSTANTS=1 copies small shader writes back at each submission; the next
 // frame's walker sees them. GOW3_READBACK_TRIGGER=<file>: "auto"/"off" switches that at run
 // time; "<lo> <hi>" (hex) copies one range back once (diagnostics).
-// gow3: a shader reading guest memory through computed addresses (DMA, e.g. Uncharted's tiled
+// gow3: a shader reading guest memory through computed addresses (DMA, e.g. a tiled
 // lighting cs 43b8ee5e) needs CPU writes on the GPU first. The full sync uploads every
 // CPU-modified resident range (per-frame constant rings, command buffers, ...) and stalls on
-// staging space: about half of the GPU thread's time in Uncharted's temple. GOW3_DMA_TRIGGER
+// staging space: about half of the GPU thread's time in a heavy scene. GOW3_DMA_TRIGGER
 // (file, read live) selects the mode: "full", "off", or "pointers <KiB>" = only windows of that
 // size around the guest addresses in the stage's user data and flattened SRT data.
 // GOW3_DMA_SYNC sets the start mode the same way. GOW3_FRAME_STATS adds 5 s statistics.
@@ -3192,7 +3192,7 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
         scan(stage->flattened_ud_buf);
         // ObtainBuffer makes the window resident and uploads its CPU writes: a DMA read of a
         // page the GPU page table does not map yet returns 0 and is only mapped after the
-        // submission (FaultManager), so per-frame data on fresh pages flickered (Uncharted hair
+        // submission (FaultManager), so per-frame data on fresh pages flickered (hair
         // and cobwebs reading their shadow cascades through MUBUF ADDR64 loads). A window can
         // cover fiber stacks: those stay writable (gow3gpu.cpp Gow3KeepWritable).
         for (const VAddr base : bases) {
@@ -3207,7 +3207,7 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
         // tracker knows nothing about them: the uploads just recorded (and any other pending
         // write there) must finish before the draw reads, and the draw's reads before later
         // copies overwrite them (ResetBindings). Without this the hair's shadow cascade data
-        // was read mid-upload now and then (Uncharted 3: hair lit for a frame).
+        // was read mid-upload now and then (hair lit for a frame).
         for (const auto* arena : dma_read_arenas) {
             needs_barrier |= runtime.IsBufferAccessed(arena, 0, arena->SizeBytes());
         }
@@ -3233,7 +3233,7 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
 
 bool Rasterizer::ReadBackEopResults() {
     // gow3: tiny GPU-written images (TextureCache::ProcessTinyReadbacks), unprotected: the CPU
-    // reads the previous value until they land (Uncharted 2 reads its aim focus distance every
+    // reads the previous value until they land (a game reading its aim focus distance every
     // frame; a read fault waiting for the GPU each time stalled its threads). Queued first, so the
     // fence waits for the last readback below if there is one.
     bool soft_pending = false;
@@ -3359,8 +3359,8 @@ void Rasterizer::SyncSmallGpuWrites() {
     // Merged in 256-byte granules (GOW3_SMALL_READBACK_ALIGN=<bytes>, a power of two). They were
     // 64 KiB windows ("the copy shader writes many small neighbouring pieces"): with the effect
     // shaders' small writes (cs 8f067540) spread over 30 MiB, the windows joined up and every
-    // GPU-written byte between them came back each submission, ~2.3 GB per 5 s in Uncharted 2
-    // and 3 that the CPU never reads (16 Oct). Neighbouring pieces still merge.
+    // GPU-written byte between them came back each submission, ~2.3 GB per 5 s
+    // that the CPU never reads (16 Oct). Neighbouring pieces still merge.
     static const u64 granule = [] {
         const char* env = std::getenv("GOW3_SMALL_READBACK_ALIGN");
         const u64 value = env ? std::strtoull(env, nullptr, 0) : 0;
@@ -3384,8 +3384,8 @@ void Rasterizer::SyncSmallGpuWrites() {
     // when the GPU is done (BufferCache::PollReadbacks, per draw), with no wait for the whole
     // frame on the GPU; until then their pages are read-protected (a read waits for that
     // readback). =2: unprotected, as first tried: data the game (or the SRT walker) read the
-    // next frame could be stale (Uncharted 3 "Command context dcb full" at the London pub;
-    // garbage sharps for the treasure pickup effect, cs 8f067540, in U1 and U2). Off by default.
+    // next frame could be stale ("Command context dcb full";
+    // garbage sharps for the treasure pickup effect, cs 8f067540). Off by default.
     // Since 15 Oct the default is 2 (unset): with the copy shaders and CP fills/copies written
     // through (BufferCache::WriteThrough), GPU-written resource tables downloaded on demand
     // (SyncSrtTables) and no lazy-write merges, these readbacks only keep CPU-read GPU results
@@ -3403,7 +3403,7 @@ void Rasterizer::SyncSmallGpuWrites() {
 }
 
 // gow3: resource tables (SRT) that another shader writes earlier in the same command stream.
-// Uncharted 2's treasure pickup effect (cs 7d7e7206, 8f067540) bound garbage V#s and the GPU
+// The treasure pickup effect (cs 7d7e7206, 8f067540) bound garbage V#s and the GPU
 // faulted (device lost): the CPU-side walker reads guest memory, which receives GPU writes only
 // at the per-submission readback (SyncSmallGpuWrites) or later, so a new effect's tables were not
 // there yet. The tables a walker reads come from its code (PushPtr: push rdi; mov rdi,
@@ -3412,7 +3412,7 @@ void Rasterizer::SyncSmallGpuWrites() {
 const Rasterizer::SrtPlan& Rasterizer::SrtPlanFor(const Shader::Info& info) {
     const auto& srt = info.srt_info;
     // gow3 20 Oct 2026 (laptop CPUs): the map lookup on every walk was ~1% of the GPU command
-    // thread on a Ryzen 7840HS (NVIDIA GPU and 780M, Uncharted 3). Plans are never erased and the
+    // thread on a Ryzen 7840HS (NVIDIA GPU and 780M). Plans are never erased and the
     // map's nodes do not move, so a small cache of plan addresses by walker is safe.
     const void* walker = reinterpret_cast<const void*>(srt.walker_func);
     auto& memo = srt_plan_memo[(reinterpret_cast<uintptr_t>(walker) >> 4) & (SrtPlanMemoSize - 1)];
@@ -4456,9 +4456,9 @@ void Rasterizer::ResetBindings(bool is_compute) {
         texture_cache.GetImage(image_id).binding = {};
     }
     // gow3 17 Oct 2026: overlapping or adjacent ranges of one buffer with the same access are
-    // tracked as one (the same tracker state, fewer inserts): Uncharted 3's crowd skinning shader
+    // tracked as one (the same tracker state, fewer inserts): the crowd skinning shader
     // binds each output array through views at +0/+12/+20, ~1,500 dispatches a frame. Compute
-    // only: sorting every draw's bindings cost Uncharted 1 and 2 (draw-heavy) 3-4%.
+    // only: sorting every draw's bindings cost draw-heavy scenes 3-4%.
     if (is_compute && bound_buffers.size() > 1) {
         std::sort(bound_buffers.begin(), bound_buffers.end(), [](const BoundBuffer& a, const BoundBuffer& b) {
             return std::tie(a.buffer, a.is_written, a.offset) < std::tie(b.buffer, b.is_written, b.offset);
@@ -4661,8 +4661,8 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 
 static bool TracedShader(u64 hash);
 
-// gow3 diagnostics (GOW3_CLOTH_CHECK=1): the CPU-written inputs of Uncharted 3's cloth compute
-// shaders (cs 1c957b01, 809864d3; Sully's shirt flickers as exploding triangles above 30 FPS,
+// gow3 diagnostics (GOW3_CLOTH_CHECK=1): the CPU-written inputs of the cloth compute
+// shaders (cs 1c957b01, 809864d3; cloth flickered as exploding triangles above 30 FPS,
 // 16 Oct) are scanned at each dispatch for non-finite or huge floats; hits are printed with the
 // frame number, plus a 5 s summary of dispatches and buffers checked.
 static void CheckClothInputs(Core::MemoryManager* memory, VideoCore::BufferCache& cache, u64 hash,
@@ -4725,12 +4725,12 @@ static void CheckClothInputs(Core::MemoryManager* memory, VideoCore::BufferCache
     }
 }
 
-// gow3 16 Oct: Uncharted 2's aim depth of field focuses on the depth under the crosshair: ps
+// gow3 16 Oct: an aim depth of field focuses on the depth under the crosshair: ps
 // 9f801363 samples a 24-pixel box of the scene depth at uv = c[6] * (ndc * c[2] + 0.5) + c[0]
 // (and 1 - c[1] + ... for v), c = 8 floats the game writes per frame. c[0], c[1] are the crosshair
 // in pixels of the HUD's 1920x1080 space times 1 / render size (c[6], c[7]): with our render
 // resolution above 1080p the box left the crosshair (4K: uv 0.25 instead of 0.5, the depth of the
-// wall beside Nate) and everything behind the target was blurred while aiming. The centre is
+// wall beside the player) and everything behind the target was blurred while aiming. The centre is
 // corrected to the HUD space for every render size (no change at 1080p). GOW3_AIM_FOCUS_FIX=0: off.
 static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCache& buffer_cache,
                               VAddr address) {
@@ -4785,8 +4785,8 @@ static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCach
     // gow3 20 Oct 2026: written through to the GPU's copy as well (BufferCache::WriteThrough).
     // A write to the backing view alone is not seen by the page tracking: when another draw had
     // already uploaded the block in that frame, the GPU kept the uncorrected centre. The user
-    // saw the aim blur again in Uncharted 2 at 4K: the focus read back alternated between the
-    // target's 2.1 m and 5.64 m, the wall beside Nate.
+    // saw the aim blur again at 4K: the focus read back alternated between the
+    // target's 2.1 m and 5.64 m, the wall beside the player.
     if (buffer_cache.WriteThrough(address, fixed, sizeof(fixed))) {
         ++n_through;
     } else {
@@ -4984,7 +4984,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      reinterpret_cast<const void*>(vsharp.base_address),
                                      memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
             }
-            // gow3: garbage V#s. Uncharted 2's treasure effect shaders (cs 7d7e7206, 8f067540)
+            // gow3: garbage V#s. The treasure effect shaders (cs 7d7e7206, 8f067540)
             // fetch V#s from table slots that hold floats for that effect (CPU-written: the
             // branches using them are not taken). Bound, they span random guest memory: written
             // ones made gigabytes of game data "GPU-modified" (stale GPU copies written back over
@@ -5095,13 +5095,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
                 // gow3 17 Oct 2026: a strided buffer covers (records - 1) * stride plus the bytes
-                // the shader reaches in a record, not a whole stride more. Uncharted's effect
+                // the shader reaches in a record, not a whole stride more. The effect
                 // shader (cs 8f067540, ~1500 dispatches a frame in crowds) writes one record array
                 // per dispatch through views at +0/+12/+20: the +20 view's V# range ran 20 bytes
                 // into the next dispatch's array, so every dispatch waited for the one before
                 // (~10 ms of GPU time a frame). Needs the tracker's gap merge (BarrierTracker::
-                // InsertRange): without those barriers its tree was never emptied (Uncharted 2's
-                // museum 79 -> 41 FPS); with it 79 -> 85. GOW3_EXACT_STRIDED_RANGES=0: whole ranges.
+                // InsertRange): without those barriers its tree was never emptied (a museum
+                // 79 -> 41 FPS); with it 79 -> 85. GOW3_EXACT_STRIDED_RANGES=0: whole ranges.
                 u64 tracked_size = size;
                 {
                     static const bool exact = [] {
@@ -5117,7 +5117,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     }
                 }
                 // gow3 17 Oct 2026: static ranges from the arena (never GPU-written mesh data,
-                // ~10k binds a frame in Uncharted 3's crowds) are tracked in 64 KiB pieces: far
+                // ~10k binds a frame in crowds) are tracked in 64 KiB pieces: far
                 // fewer barrier tracker nodes; a wider read range only adds barriers.
                 // GOW3_STATIC_TRACK_KB (default 64, 0 = exact).
                 static const u64 static_track = [] {
@@ -6172,7 +6172,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
 
         if (regs.depth_buffer.DepthValid()) {
             attachment.clear_value[0] = is_depth_clear ? std::bit_cast<u32>(regs.depth_clear) : 0u;
-            // gow3 diagnostics (Uncharted shadow map D16 0x11352d0000 found cleared to 0): every
+            // gow3 diagnostics (a D16 shadow map found cleared to 0): every
             // distinct depth clear (format, value, how it was requested) once, and the live switch
             // "dbclear one" (GOW3_DMA_TRIGGER) clearing 16-bit depth targets to 1.0.
             if (is_depth_clear) {
@@ -6638,8 +6638,8 @@ void Rasterizer::LandWatchedReadback(VAddr addr, bool assume_locks) {
     }
     // gow3 21 Oct 2026 (GPU worker): GOW3_LAND_ON_GUEST=1 - the faulting guest thread waits for
     // the GPU itself instead of the command thread. LandReadbacksWatching waits for the readback's
-    // submission on the command thread (~5 ms each on the desktop's Radeon iGPU, 20-50 per 5 s in
-    // Uncharted 2): meanwhile nothing new reached the GPU, which ran dry and then idled until the
+    // submission on the command thread (~5 ms each on the desktop's Radeon iGPU, 20-50 per 5 s):
+    // meanwhile nothing new reached the GPU, which ran dry and then idled until the
     // next submission (2.5-3.4 ms of idle GPU per 33 ms frame). Here the command thread only lands
     // what has finished and names the newest readback still holding the page; the guest thread
     // (holding no cache locks) waits for that submission, then asks again (other readbacks may
@@ -6760,7 +6760,7 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
         return false;
     }
     // gow3 17 Oct 2026: the resource-table checks ask this for every table of every draw (6% of
-    // the GPU command thread in Uncharted 3): the last mapped intervals found stay valid until
+    // the GPU command thread): the last mapped intervals found stay valid until
     // something is unmapped.
     struct CachedInterval {
         u64 generation;
@@ -6801,7 +6801,7 @@ extern std::atomic<u64> g_invalidate_downloads, g_invalidate_download_ns;
 namespace Vulkan {
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
-    // gow3 19 Oct 2026: time of each part (U1: ~23 ms per 1 MiB unmap, a 1.8 s hitch before a
+    // gow3 19 Oct 2026: time of each part (~23 ms per 1 MiB unmap, a 1.8 s hitch before a
     // cutscene); a line when they took 20 ms or more since the last one (at most every 0.25 s).
     using Clock = std::chrono::steady_clock;
     static std::atomic<u64> unmaps{0}, drain_ns{0}, buffer_ns{0}, texture_ns{0};
@@ -6953,7 +6953,7 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.height = yscale * 2.0f * target_scale[1];
         }
 
-        // gow3 diagnostic ("clear far" in GOW3_DMA_TRIGGER): Uncharted's shadow map clear quad
+        // gow3 diagnostic ("clear far" in GOW3_DMA_TRIGGER): a shadow map clear quad
         // (vs a7fbc2a8, z = -1) writes depth 1.0 instead of the clamped 0.
         if (shadow_clear_far.load(std::memory_order_relaxed) && dynamic_vs_hash == 0xa7fbc2a8u) {
             viewport.minDepth = viewport.maxDepth = 1.0f;
@@ -7119,7 +7119,7 @@ void Rasterizer::UpdateDepthStencilState() const {
     if (depth_bias_enabled) {
         const bool front = regs.polygon_control.enable_polygon_offset_front;
         {
-            // gow3 diagnostics: each distinct polygon offset setup once (Uncharted D16 shadows).
+            // gow3 diagnostics: each distinct polygon offset setup once (D16 shadows).
             static std::mutex bias_mutex;
             static std::vector<std::array<u32, 6>> bias_seen;
             const std::array<u32, 6> key{std::bit_cast<u32>(regs.poly_offset.front_offset),

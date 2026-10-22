@@ -14,8 +14,6 @@ pacman -S --needed git patch \
 magic_enum, miniz and xbyak (not packaged by MSYS2) are submodules under `gpu/third_party/`;
 FSR-Vulkan gets this project's patches (`gpu/patches/fsr-vulkan`) applied by `build.sh`.
 
-Then, in the repository: `gow3_pc/build.sh`, and `tools/package_windows.sh` for the player
-package (see the [main README](../../../README.md)).
+Then, in the repository: `gow3_pc/build.sh` (see the [main README](../../../README.md)).
 
-`gow3-probe.rc` / `gow3-probe.manifest` give the runtime its icon (`uncharted.ico`) and Windows
-settings (UTF-8 file paths, long paths, DPI awareness).
+`gow3-probe.rc` / `gow3-probe.manifest` give the runtime its Windows settings (UTF-8 file paths, long paths, DPI awareness).

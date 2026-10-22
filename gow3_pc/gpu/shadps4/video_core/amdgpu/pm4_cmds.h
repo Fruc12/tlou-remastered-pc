@@ -385,7 +385,7 @@ static u64 GetGpuClock64() {
 
 // gow3 diagnostics (GOW3_TIMESTAMP_STATS=1): GPU timestamps the guest asks for (end-of-pipe and
 // release fences with GpuClock64/PerfCounter data): per 5 s, how many and, per address, how far
-// apart consecutive writes are in real time (Uncharted 3's cloth flicker above 30 FPS, 16 Oct).
+// apart consecutive writes are in real time (a cloth flicker above 30 FPS, 16 Oct).
 inline void Gow3NoteTimestamp(const char* kind, const void* address) {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_TIMESTAMP_STATS");

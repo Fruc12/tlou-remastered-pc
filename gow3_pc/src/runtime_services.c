@@ -105,11 +105,8 @@ static ABI int32_t hide_splash(void) { note("SystemService: splash screen hidden
 static ABI int32_t safe_area(float *info) { if (!info) return SYSTEM_PARAMETER; *info=1.0f; return 0; } /* full screen */
 static ABI int32_t disable_music_player(void) { return 0; }
 static ABI int32_t launch_browser(void) { note("SystemService: web browser request ignored (offline)"); return 0; }
-/* The Nathan Drake Collection is three executables: the menu (eboot.bin, also Drake's Fortune)
- * starts Uncharted 2/3 with LoadExec("/app0/big2-ps4_Shipping.elf", {"eboot.bin",
- * "ispartofuccollection"}) and they return the same way; argv is the new program's complete argv
- * (argv[0] "eboot.bin"; Uncharted 2/3 treat any unknown argument as a level to load and skip the
- * title screen). The PS4 replaces the running process;
+/* LoadExec switches to another executable of the game, with argv the new program's complete argv
+ * (argv[0] "eboot.bin"). The PS4 replaces the running process;
  * here the path and arguments go to GOW3_LOADEXEC_FILE (one per line) and the process exits
  * with LOADEXEC_EXIT so the launcher prepares and starts the requested executable. */
 #define LOADEXEC_EXIT 30
@@ -134,7 +131,7 @@ static ABI int32_t load_exec(const char *path,const char *const *argv) {
 }
 
 /* ---- NetCtl / Net / Http / Ssl: no network ---- */
-/* POSIX sockets (Uncharted 2/3 through libScePosix): the cable is unplugged. */
+/* POSIX sockets (through libScePosix): the cable is unplugged. */
 #define GUEST_EBADF 9
 #define GUEST_ENETDOWN 50
 static ABI int32_t posix_socket_none(void) { *runtime_errno()=GUEST_ENETDOWN; return -1; }
@@ -482,7 +479,8 @@ static ABI int32_t ime_result(uint32_t *result) {
 static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
 
 /* ---- Trophies (gow3_trophies.cpp shows them) ----
- * The three games keep three trophy lists, sce_sys/trophy/trophy01-03.trp; a game's context names
+ * A game keeps its trophy lists in sce_sys/trophy/trophyNN.trp (The Last of Us Remastered: one,
+ * trophy00.trp); a game's context names
  * its list by its service label. Earned trophies are saved in <user>/trophy/trophyNN.txt (an
  * "id time" line each) and reported back to the game; a newly earned one is shown as a popup. */
 #define TROPHY_LISTS 4

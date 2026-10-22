@@ -73,10 +73,10 @@ class ThreadInfo(c.Structure):
     _fields_=[("exit",w.LONG),("teb",c.c_void_p),("pid",c.c_void_p),
               ("tid",c.c_void_p),("affinity",c.c_size_t),("priority",w.LONG),("base_priority",w.LONG)]
 ntdll.NtQueryInformationThread.argtypes=[w.HANDLE,w.ULONG,c.c_void_p,w.ULONG,c.c_void_p]
-log=(ROOT/"analysis/uncharted/boot.log").read_text(errors="replace")
+log=(ROOT/"analysis/tlou/boot.log").read_text(errors="replace")
 match=re.search(r"Guest image base: ([\da-fA-F]+)",log)
 base=int(match[1],16) if match else 0
-analysis=json.loads((ROOT/"analysis/uncharted/analysis.json").read_text(encoding="utf-8"))
+analysis=json.loads((ROOT/"analysis/tlou/analysis.json").read_text(encoding="utf-8"))
 executable=[(base+p["vaddr"],base+p["vaddr"]+p["memsz"]) for p in analysis["program_headers"] if p["type"]==1 and p["flags"]&1]
 def label(address):
     if base<=address<base+0x2000000: return f"guest+0x{address-base:x}"

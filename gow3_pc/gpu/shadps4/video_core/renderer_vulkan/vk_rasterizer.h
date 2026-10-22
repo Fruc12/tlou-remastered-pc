@@ -145,7 +145,7 @@ public:
     /// gow3: at an end-of-pipe event, the output of dispatches whose results the guest reads
     /// once it sees that event (eop_readbacks) is read back asynchronously with its pages
     /// read-protected: a guest read before the GPU is done waits for that readback only.
-    /// (Delaying the event instead broke Uncharted 1: it is the frame's end-of-pipe tick, which
+    /// (Delaying the event instead broke a game: it is the frame's end-of-pipe tick, which
     /// FrameBegin asserts two frames later.)
     bool ReadBackEopResults();
     /// gow3: a fence label the runtime writes to guest memory (BufferCache::NoteCpuWrite).
@@ -520,7 +520,7 @@ private:
     /// Ranges downloaded after every submission (GOW3_READBACK_TRIGGER "range <lo> <hi>").
     std::vector<std::pair<VAddr, u64>> synced_ranges;
     /// gow3: storage written by shaders whose results the guest reads right after the next
-    /// end-of-pipe event (ReadBackEopResults). Uncharted 1's mesh ray casts (bullet impacts,
+    /// end-of-pipe event (ReadBackEopResults). Mesh ray casts (bullet impacts,
     /// blood and other decals): the event's interrupt marks the batch done and the game reads
     /// the hits at once; fences are written when recorded, so it read stale results (no hits).
     std::vector<std::pair<VAddr, u64>> eop_readbacks;
@@ -528,7 +528,7 @@ private:
     /// back without protecting their pages: the guest reads them after the fence, which is
     /// written once they land (GOW3_DEFER_RAYCAST_FENCES). Protected, every guest write into
     /// those pages (the next batch) faulted and waited for the GPU thread and the readback:
-    /// Uncharted 3's ray-cast thread stalled with the ray-cast lock held (rooftops: 2-3 fast
+    /// A ray-cast thread stalled with the ray-cast lock held (rooftops: 2-3 fast
     /// frames, then one of 25-35 ms). Opt-in, GOW3_OPEN_RAYCAST_READBACKS=1: measured on the
     /// rooftops it removed the faults on ray-cast pages but not the uneven frames (18 Oct).
     std::vector<std::pair<VAddr, u64>> eop_open_readbacks;

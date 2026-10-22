@@ -1,7 +1,7 @@
-/* The games' own draw and shadow distances, scaled from the in-game menu (Image tab): Uncharted 2
- * and 3 (1.02) keep them in two settings blocks in the image (the debug menu's "Fade Distance
- * Scale" family, "Max Sunlight Shadow Dist", "Max Shadow Dist (point/spot lights)"). The layout is
- * recognised by the games' defaults before anything is written. */
+/* The game's own draw and shadow distances, scaled from the in-game menu (Image tab), once the
+ * settings block that holds them is found in the image (recognised by the game's defaults before
+ * anything is written). Not located in The Last of Us Remastered yet: nothing is found, and the
+ * menu keeps its distance sliders disabled. */
 #pragma once
 #include <stdint.h>
 

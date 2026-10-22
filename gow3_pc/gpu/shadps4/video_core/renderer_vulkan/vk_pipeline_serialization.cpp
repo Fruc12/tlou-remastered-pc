@@ -597,7 +597,7 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
                                        fmt::format("g_{:#018x}", hash), ar.TakeOff());
 }
 
-// gow3 21 Oct 2026 (Uncharted 3 museum: a tiled floor drawn flat red on one PC only): a meta and
+// gow3 21 Oct 2026 (a tiled floor drawn flat red on one PC only): a meta and
 // the binary of the same permutation are separate files. On 20 Oct a session rewrote
 // 0x91304408_4.spv with another permutation's code while the rename of its meta failed (the
 // warm-up was reading the old one; only that .meta.tmp was left), and every later start drew the
@@ -644,8 +644,8 @@ bool BinaryMatchesMeta(const std::vector<u32>& spv, u64 binary_hash, u64 pgm_has
     return matches;
 }
 
-// gow3 21 Oct 2026 (#92, #95): before the compile-storm fix, two compute shaders the three games
-// share (8f067540, 7d7e7206) built a new version for every set of garbage floats in buffer slots
+// gow3 21 Oct 2026 (#92, #95): before the compile-storm fix, two compute shaders
+// (8f067540, 7d7e7206) built a new version for every set of garbage floats in buffer slots
 // they don't use, and the cache kept each one: 1,268 and 383 versions here, 23,845 compute
 // pipelines in one reporter's cache. The warm-up built all of them at every start (332 s in #95;
 // an RX 9070 XT's driver crashed near the end in #92), and none is ever used again: those slots

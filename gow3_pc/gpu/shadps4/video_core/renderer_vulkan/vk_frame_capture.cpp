@@ -256,8 +256,8 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     }
     // Frame boundaries in the command stream: the pass that writes a display buffer as its only
     // target. gow3: God of War III also draws scene passes (two targets) into display buffers.
-    // GOW3_CAPTURE_PASSES=<n>: record the next n passes, without frame boundaries (Uncharted
-    // pipelines its frames; neither flips nor display buffer passes delimit them).
+    // GOW3_CAPTURE_PASSES=<n>: record the next n passes, without frame boundaries (the
+    // game pipelines its frames; neither flips nor display buffer passes delimit them).
     static const long pass_limit = [] {
         const char* v = std::getenv("GOW3_CAPTURE_PASSES");
         return v ? std::strtol(v, nullptr, 10) : 0L;
@@ -360,7 +360,7 @@ void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* d
                                   slot, address, size);
     // gow3 18 Oct 2026: guest buffers are read through the backing view, which reports unmapped
     // memory instead of faulting. A compute dispatch bound a buffer at guest address 0 and the
-    // capture read it directly: a capture requested in play ended Uncharted with a null read.
+    // capture read it directly: a capture requested in play ended the game with a null read.
     std::array<float, 256> copy{};
     if (address != 0) {
         if (!Core::Memory::Instance()->TryReadBacking(address, copy.data(), bytes)) {

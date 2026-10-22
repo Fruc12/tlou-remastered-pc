@@ -275,10 +275,10 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     Gow3WriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, Gow3WriteLog::Backing);
     return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
 }
-// Uncharted: fiber stacks (gow3_fiber.cpp) stay writable. GPU write tracking protects any guest
+// Fiber stacks (gow3_fiber.cpp) stay writable. GPU write tracking protects any guest
 // memory a buffer binding covers, and the DMA pointer windows (Rasterizer::SyncDmaMemory) can
 // cover the job system's fiber stacks; a write-protected stack in use kills the process, since
-// Windows cannot push the exception frame onto it (Uncharted 2, ChooseJob). Their CPU writes
+// Windows cannot push the exception frame onto it (the job system's ChooseJob). Their CPU writes
 // are not tracked: the GPU never reads them.
 namespace {
 std::mutex g_keep_writable_mutex;
@@ -494,7 +494,7 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
 #endif
     Core::Emulator::FillElfInfo(*config);
     // gow3: the port's author in the title bar.
-    const std::string title = std::string(config->title ? config->title : "Uncharted: The Nathan Drake Collection") +
+    const std::string title = std::string(config->title ? config->title : "The Last of Us Remastered") +
                               " — PC port by BilalReloaded";
     const s32 width = config->width, height = config->height;
     g_window_thread = std::thread([title, width, height] {

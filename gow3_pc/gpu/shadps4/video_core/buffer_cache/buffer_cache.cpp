@@ -245,7 +245,7 @@ static std::string WindowWriters(u64 window) {
 }
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
-// gow3: 512 MiB (GOW3_STREAM_MB overrides; 64-2048): with two frames queued Uncharted 2's heavy
+// gow3: 512 MiB (GOW3_STREAM_MB overrides; 64-2048): with two frames queued heavy
 // scenes wrapped the 128 MiB ring in under two frames and waited for the GPU (1.3 s per 5 s).
 static size_t StreamBufferSize() {
     const char* env = std::getenv("GOW3_STREAM_MB");
@@ -447,14 +447,14 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         }
         // gow3 20 Oct 2026 (Radeon 780M): an integrated GPU's "video memory" heap is a small
         // slice of system memory set aside for it (256 MiB on a Ryzen 7840HS laptop); the arenas
-        // (1-2 GB in Uncharted 2 and 3) went there and the driver kept moving them. Its memory
+        // (1-2 GB) went there and the driver kept moving them. Its memory
         // is the system's anyway: the arenas go to the largest CPU-mappable system memory heap
         // (CPU-cached if offered), so they need no moving and finished GPU data is read in place.
-        // Measured on the 780M (Uncharted 3, 720p, twice each): 43.9/45.1 -> 47.2 FPS in the
+        // Measured on the 780M (720p, twice each): 43.9/45.1 -> 47.2 FPS in the
         // same view, 46-47K -> 48.5-53.5K draws/s, the GPU command thread waiting for the GPU
         // 3-3.7% -> 0.1-0.5%, CPU writes into GPU data read in place instead of a full download.
         // Integrated GPUs only; GOW3_IGPU_ARENAS=local: the video memory heap, as before. (The
-        // subtitle / pause menu flicker the user saw in Uncharted 2 on the 780M is not this: it
+        // subtitle / pause menu flicker the user saw on the 780M is not this: it
         // shows with local arenas and with the build from before 20 Oct as well.)
         if (const char* env = std::getenv("GOW3_IGPU_ARENAS");
             instance.IsIntegrated() && !(env && std::string_view{env} == "local")) {
@@ -568,7 +568,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 // gow3 19 Oct 2026: downloads made before a range is invalidated (count, time), read by
-// Rasterizer::UnmapMemory's timing line (U1 cutscene hitch).
+// Rasterizer::UnmapMemory's timing line (a cutscene hitch).
 std::atomic<u64> g_invalidate_downloads{0}, g_invalidate_download_ns{0};
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
@@ -608,7 +608,7 @@ void BufferCache::SmallGuestCopy(const Gow3Copy::Item& item) {
 }
 
 void BufferCache::ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks) {
-    // gow3 18 Oct 2026: Uncharted 3 froze on the Cartagena rooftops (chapter 2). The game cleared
+    // gow3 18 Oct 2026: a game froze on a rooftop level. It cleared
     // a field of its next ray-cast batch (a read-modify-write) in a page a pending readback still
     // read-protected. The write fault found no GPU bytes under the written ones and returned; the
     // page stayed protected and the instruction faulted again and again, while the readback, long
@@ -704,7 +704,7 @@ static std::atomic<u32> g_readback_yields;
 // gow3 18 Oct 2026, readback guard: GPU data comes back to guest memory late, up to a frame or
 // two after the guest saw the fence of the work that wrote it (readbacks land when the GPU is
 // done; most fences do not wait for them). Where the CPU can write without a fault (pages shared
-// with GPU data in flight, lazy writes), the guest may reuse those bytes in between. Uncharted 3
+// with GPU data in flight, lazy writes), the guest may reuse those bytes in between. A game
 // freed the cloth buffers of an area it unloaded, its allocator wrote free-list links into them,
 // and the late cloth readback put float data over the links: a crash in the allocator after
 // ~40 minutes of play (18 Oct). Late GPU data now never overwrites a 64-byte line the guest
@@ -725,7 +725,7 @@ static bool ReadbackGuardEnabled() {
     return enabled;
 }
 // gow3 20 Oct 2026 (laptop CPUs): every submission queues a readback of the small GPU writes
-// (SyncSmallGpuWrites; Uncharted 3: ~135 submissions a frame) with a snapshot of the guest bytes,
+// (SyncSmallGpuWrites; ~135 submissions a frame) with a snapshot of the guest bytes,
 // and its landing copies the guest bytes once more (LandGuarded). The snapshot vector was zeroed,
 // then copied over, then freed at landing; on a Ryzen 7840HS (laptop, 47 FPS with the
 // GPU command thread CPU-bound) the zeroing and fresh pages were 1.5% of that thread (1.8% with
@@ -765,7 +765,7 @@ static bool GuardLogNow() {
 
 // GOW3_ASYNC_READBACK=1: pages with a readback in flight are read-protected, so the CPU (the game,
 // or the SRT walker) never reads their stale data: a read waits for that readback only. =2 is
-// the earlier unprotected mode (stale reads: Uncharted 3 "dcb full", garbage sharps).
+// the earlier unprotected mode (stale reads: "dcb full", garbage sharps).
 static bool SafeReadbacks() {
     // GOW3_ASYNC_READBACK=1: pages of pending readbacks are read-protected (a CPU read waits for
     // its readback). Default (unset, 2): not protected, the CPU reads the previous value.
@@ -779,7 +779,7 @@ static bool SafeReadbacks() {
 // GOW3_LAZY_WRITES=1: a CPU write into a GPU-written page goes ahead without a download; the
 // GPU bytes are merged in later where guest memory still matches a snapshot. Off by default
 // since 15 Oct: a byte the CPU rewrites with its previous value is indistinguishable from an
-// untouched one, so the merge put stale GPU bytes back into rewritten data (Uncharted 2's
+// untouched one, so the merge put stale GPU bytes back into rewritten data (the
 // skinning tables in the per-frame ring: half-float V#s, a GPU hang and game asserts at the
 // treasure screen).
 static std::atomic<u32> g_direct_page_reads{0};
@@ -951,7 +951,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     // into GPU data whose newest GPU write is submitted but not finished made the GPU command
     // thread wait for the GPU in the second-queue copy (SideQueueFetch -> waitSemaphores): 24-38
     // ms per such fault with multithreaded rendering (the GPU runs further behind), with no draw
-    // processed meanwhile (Uncharted 3: 44-77 ms frames). The request now returns that tick
+    // processed meanwhile (44-77 ms frames). The request now returns that tick
     // instead (deferred_tick); the guest thread waits for it on the work semaphore and sends the
     // request again, which finds the page's GPU writes finished (re-checked from the start). The
     // command thread never waits for a guest thread, and a tick FetchableWindowTick returns is
@@ -1043,10 +1043,10 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // gow3: ray-cast result readbacks (yield_to_cpu): a CPU write into one is the guest
             // refilling the buffer for its next batch, so the pending GPU values of that piece
             // are dropped, not waited for. With multithreaded rendering the recording thread
-            // runs behind and every such write waited for the GPU (Uncharted 2: about 8 ms per
+            // runs behind and every such write waited for the GPU (about 8 ms per
             // frame, a third of it).
             // 16 Oct: dropping them threw away nearly every ray-cast batch's results in
-            // Uncharted 2 (~250 per 5 s): the guest had read the stale buffer at once (the fence
+            // (~250 per 5 s): the guest had read the stale buffer at once (the fence
             // was written when recorded) and refilled it, and NPCs placed with those results fell
             // from the sky. Ray-cast fences now wait for their readback (RunEventWriteEop), so the
             // guest reads first; a write into pending results waits for them below (counted).
@@ -1064,7 +1064,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // output and the like in the per-frame rings). A CPU write into one of its pages is
             // the guest reusing that ring memory: the page's part of the piece is dead and is
             // dropped instead of waited for. With multithreaded rendering every such write waited
-            // about 18 ms for the GPU (Uncharted 2: 20+ per second, a third of the frame). Small
+            // about 18 ms for the GPU (20+ per second, a third of the frame). Small
             // pieces (constants the CPU reads back) still wait.
             {
                 const VAddr pages_lo = Common::AlignDown(device_addr, 4096);
@@ -1118,12 +1118,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // gow3 17 Oct 2026: the page's GPU bytes are final (the last GPU write into its 1 MiB
             // window has finished) and the arenas are in CPU-mappable video memory (Resizable BAR,
             // integrated GPUs): copy them from there. The download below waited for all GPU work
-            // queued since, the current frame's included (Uncharted 3, crowded street: ~150 per
+            // queued since, the current frame's included (crowded street: ~150 per
             // 5 s, ~10 ms each at 1440p-4K, 60 -> 45 FPS).
             // gow3 21 Oct 2026 (GOW3_FETCH_BATCH_MAPPED=1, laptop): with CPU-mappable
             // arenas (Resizable BAR) the direct read below fetched one page per fault, so the
-            // window batch of CopyFinishedGpuPage (GOW3_FETCH_BATCH_KB) never ran there. Uncharted
-            // 3 streaming a level part into memory the GPU wrote long ago (Cartagena rooftops):
+            // window batch of CopyFinishedGpuPage (GOW3_FETCH_BATCH_KB) never ran there. A game
+            // streaming a level part into memory the GPU wrote long ago (a rooftop level):
             // ~7,700 write faults in 5 s on whole GPU-written pages, each an uncached 4 KiB read
             // of video memory plus a round trip to the GPU command thread: 50-180 ms frames. When
             // another page of the fault's window is finished GPU data too, the batched copy on the
@@ -1201,7 +1201,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             }
             // gow3: the GPU bytes in this page come from work still in flight (recorded in this
             // submission or not finished): the guest, a frame ahead, writes next to them (false
-            // sharing: ~90 per second in heavy U2 scenes, each a download waiting for all GPU
+            // sharing: ~90 per second in heavy scenes, each a download waiting for all GPU
             // work). The write goes ahead; the page's GPU bytes stay the GPU's (uploads skip
             // them) until the next readback brings them. No guest bytes are compared (the
             // lazy-write merge did, and put stale GPU bytes back into rewritten data).
@@ -1210,7 +1210,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 const char* env = std::getenv("GOW3_SHARED_WRITES");
                 return !(env && env[0] == '0');
             }();
-            // gow3 17 Oct 2026: GPU bytes partly in flight, partly old (Uncharted 3 street: ~120
+            // gow3 17 Oct 2026: GPU bytes partly in flight, partly old (a crowded street: ~120
             // per 5 s, each a full download): the old ones are fetched on the second queue (they
             // are final), then the page takes the shared path.
             if (shared_writes && !gpu_modified_ranges.Intersects(device_addr, size) &&
@@ -1251,7 +1251,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // gow3 20 Oct 2026 (integrated GPUs): without a second queue of the graphics family
             // (the Radeon 780M has one) CopyFinishedGpuPage cannot fetch, and the download below
             // waits for all GPU work queued so far, the frame in flight included: 3.2% of the GPU
-            // command thread on a 780M (Uncharted 3, 720p, Ryzen 7840HS). With CPU-mappable
+            // command thread on a 780M (720p, Ryzen 7840HS). With CPU-mappable
             // arenas (an integrated GPU's memory is the system's) waiting only for the submission
             // that last wrote the page's window, then reading the page in place, does the same.
             // GOW3_WAIT_PAGE_READ=0: the download, as before.
@@ -1675,7 +1675,7 @@ void BufferCache::WriteBackGpuData(VAddr address, const u8* data, u64 size,
         std::array<u8, LAZY_PAGE_SIZE> guest;
         // Through the backing view: the page may still be read-protected for this very readback
         // (CompleteReadbacks unwatches after the write-back); a read fault there completed the
-        // same readback again, recursively, until the stack ran out (U2 silent exit, 15 Oct).
+        // same readback again, recursively, until the stack ran out (a silent exit, 15 Oct).
         if (!memory->TryReadBacking(page, guest.data(), LAZY_PAGE_SIZE)) {
             memory->CopySparseMemory(page, guest.data(), LAZY_PAGE_SIZE);
         }
@@ -2655,7 +2655,7 @@ void BufferCache::PollReadbacksNow() {
 // beside the readback's GPU bytes, or GPU bytes it may overwrite) left the page protected: the
 // write fault marks it CPU-modified, but only landing the readback lifts the protection, so the
 // store faulted again until the GPU thread happened to land it. With the GPU thread idle (the
-// guest waits for the very job that writes) nothing did: Uncharted 3 on the Radeon 780M stopped
+// guest waits for the very job that writes) nothing did: a game on the Radeon 780M stopped
 // flipping at level loads, one job worker spending ~20 s in the kernel on a single store. Watches
 // start after submission, so the wait below is for work already sent to the GPU.
 u64 BufferCache::WatchingTick(VAddr page) const {
@@ -2930,7 +2930,7 @@ bool BufferCache::CopyFinishedGpuPage(VAddr page, bool finished_only) {
     }
     // gow3 20 Oct 2026: the other pages of the fault window (GOW3_FAULT_WINDOW, 256 KiB) whose
     // GPU bytes are final come along in the same copy. When the game rewrites memory the GPU
-    // wrote earlier (level streaming into reused memory: Uncharted 1 chapter 3 and Uncharted 2,
+    // wrote earlier (level streaming into reused memory:
     // ~9,000-14,000 such faults per 5 s, every page of whole 1 MiB windows), each 4 KiB page
     // was a copy on the second queue plus a wait (~0.25 ms): 35-70 ms frames. The fetched pages
     // stop being GPU data, so ExtendWriteFault right after lets the rest of the window be
@@ -3196,7 +3196,7 @@ void PrintBufferStats() {
 }
 } // namespace
 
-// gow3 17 Oct 2026: Uncharted 3's crowd skinning shader (cs 8f067540, ~1,500 dispatches a frame)
+// gow3 17 Oct 2026: the crowd skinning shader (cs 8f067540, ~1,500 dispatches a frame)
 // reads each character's mesh arrays (5 of 1-8 KB, never written after loading) as small read-only
 // buffers: the stream path copied them from guest memory on every bind, ~43 MB a frame at 4K and
 // the GPU command thread's main cost there. A range bound in 3 submissions moves to the arena,
@@ -3298,7 +3298,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         }
         // gow3 17 Oct 2026: the same range bound again in the same submission, before the guest
         // has seen any GPU write (after which it may rewrite the memory), can reuse the copy: the
-        // guest wrote it before submitting. Uncharted 3 at 4K: only 12% of the copies, and the
+        // guest wrote it before submitting. At 4K: only 12% of the copies, and the
         // lookups cost more than they saved (GOW3_STREAM_REUSE=1: on).
         static const bool reuse = [] {
             const char* env = std::getenv("GOW3_STREAM_REUSE");
@@ -3429,7 +3429,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                 const auto hi = static_cast<u16>(std::min(end, page + 4096) - page);
                 // The same range written again (every frame): its newest tick is what counts.
                 // Appending instead grew each page's list by one entry per frame, and the prune
-                // below scanned it all on every binding (Uncharted 2: about 1 MB of memory per
+                // below scanned it all on every binding (about 1 MB of memory per
                 // second, the frame rate falling from 42 to 31 FPS over a few minutes).
                 const auto same = std::find_if(writes.begin(), writes.end(), [&](const PageWrite& w) {
                     return w.lo == lo && w.hi == hi;
@@ -3804,7 +3804,7 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
 
 void BufferCache::ReclaimArenaMemory() {
     // gow3 20 Oct 2026 (GitHub #95): the arenas only grew. Every range the GPU ever used stayed
-    // bound to video memory: Uncharted 2 on a laptop, 16 min, one level change: 320 ->
+    // bound to video memory: a laptop, 16 min, one level change: 320 ->
     // 1,920 MiB, never less, while images were collected (1,401 -> 502 MiB). Through a long
     // session that fills cards with 4-8 GB, and the driver then moves memory to system RAM
     // (frame rate falling) or runs out. Now, once the arenas hold more than their limit, 1 MiB

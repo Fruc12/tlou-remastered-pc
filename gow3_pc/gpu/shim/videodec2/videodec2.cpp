@@ -19,7 +19,7 @@ namespace Libraries::Videodec2 {
 
 // gow3: when a movie frame was last decoded (steady clock, ns). The Collection's cutscenes are
 // prerecorded movies; with the frame rate unlocked the present thread gives the game 60 Hz
-// vblanks while one plays (videoout/driver.cpp, after the reference Uncharted port).
+// vblanks while one plays (videoout/driver.cpp).
 std::atomic<s64> last_movie_frame_ns{0};
 
 static constexpr u64 kMinimumMemorySize = 16_MB; ///> Fake minimum memory size for querying

@@ -291,7 +291,7 @@ static ABI int32_t audio_volume(int32_t handle, int32_t flags, const int32_t *vo
     return 0;
 }
 /* The speaker channels the game is told it drives; it mixes its 8-channel main port for them
-   (Uncharted 2, 21 Oct 2026: told 2, only L/R carry sound; told 6, L R C LFE and the surround
+   (21 Oct 2026: told 2, only L/R carry sound; told 6, L R C LFE and the surround
    pair in channels 7-8; told 8, all eight). GOW3_AUDIO_SPEAKERS=auto (default: the output
    device's channels, 8 for 7.1, 6 for 5.1, else stereo), 2, 6 or 8. A stereo device keeps the
    game's own stereo mix; a 5.1/7.1 mix forced onto it is folded to stereo (downmix_stereo). */

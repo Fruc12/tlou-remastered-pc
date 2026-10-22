@@ -177,7 +177,7 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
         // Effectively acts as a poll; only events that have already
         // arrived at the time of this function call can be received.
         // gow3: under the queue lock. Reading and clearing an event while TriggerEvent sets it
-        // on another thread lost the second trigger (Uncharted: a level stayed unloaded until
+        // on another thread lost the second trigger (a level stayed unloaded until
         // an unrelated load woke the loader).
         std::scoped_lock lock{m_mutex};
         return GetTriggeredEvents(ev, num);
@@ -197,7 +197,7 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
     };
 
     // gow3 18 Oct 2026 (GOW3_EQUEUE_SPIN_US=<n>): watch for a trigger for up to n us before
-    // sleeping. Uncharted 3's interrupt handler threads take ~2,200 compute interrupts a frame,
+    // sleeping. A game's interrupt handler threads can take ~2,200 compute interrupts a frame,
     // each one a kernel wakeup (~7% of the GPU command thread on a Ryzen laptop); a waiter
     // still spinning when the next one comes takes it without being woken. No wakeup is lost:
     // the sleep below re-checks under the lock, as before.
@@ -208,7 +208,7 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
     }();
     // gow3 20 Oct 2026 (GOW3_IRQ_WAIT_SPIN=<us>, opt-in, off by default): the same watch, only
     // for a queue that handed out a GPU interrupt event (GraphicsCore) in the last 2 ms. Measured
-    // on a Ryzen 7840HS laptop (NVIDIA GPU 47 FPS, Radeon 780M 41 FPS, Uncharted 3, the GPU command
+    // on a Ryzen 7840HS laptop (NVIDIA GPU 47 FPS, Radeon 780M 41 FPS, the GPU command
     // thread CPU-bound with 0.4% idle): waking the sleeping interrupt thread was 6.9% (6.7%) of
     // the GPU command thread, one kernel call per compute interrupt (TriggerEvent ->
     // notify_all). A waiter that watches finds the next interrupt without a wakeup; the guest
@@ -339,7 +339,7 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
     // gow3: every waiter re-checks; with several threads waiting on one queue, a single
     // wakeup could go to one that does not take the event. 17 Oct 2026: only when an event
     // became pending and a thread waits (counted under the lock, which a waiter holds from its
-    // last check until it sleeps): Uncharted 3's compute interrupts cost the GPU command thread
+    // last check until it sleeps): ~2,200 compute interrupts a frame cost the GPU command thread
     // ~8% in wakeup calls at 4K. GOW3_EQUEUE_STATS=1: triggers and wakeups per 5 s.
     static const bool stats = [] {
         const char* env = std::getenv("GOW3_EQUEUE_STATS");
@@ -363,7 +363,7 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
         }
     }
     // A pending event already woke the waiters (or one finds it before sleeping): coalesced, as
-    // the kernel does. Uncharted 3: ~2,200 compute interrupts a frame in crowds.
+    // the kernel does. Up to ~2,200 compute interrupts a frame in crowded scenes.
     static const bool always = [] {
         const char* env = std::getenv("GOW3_EQUEUE_ALWAYS_NOTIFY");
         return env && env[0] == '1';

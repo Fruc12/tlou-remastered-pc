@@ -7,7 +7,7 @@ parser.add_argument("tokens",nargs="+",help="Runtime pad tokens, e.g. cross or l
 parser.add_argument("--milliseconds",type=int,default=100)
 args=parser.parse_args()
 if not 20<=args.milliseconds<=3000: parser.error("Pulse must be 20..3000 milliseconds")
-path=Path(__file__).resolve().parent.parent/"analysis/uncharted-user/probe-pad.txt"
+path=Path(__file__).resolve().parent.parent/"analysis/tlou-user/probe-pad.txt"
 try:
     path.write_text(" ".join(args.tokens),encoding="ascii")
     time.sleep(args.milliseconds/1000)

@@ -284,7 +284,7 @@ static void set_host_name(const char *name) {
 #define exit_setjmp(t) setjmp((t)->exit_jump)
 #define exit_longjmp(t) longjmp((t)->exit_jump,1)
 #endif
-/* gow3 diagnostics (16 Oct, Uncharted 3's cloth flicker above 30 FPS): GOW3_GUEST_AFFINITY=1
+/* gow3 diagnostics (16 Oct, a cloth flicker above 30 FPS): GOW3_GUEST_AFFINITY=1
  * pins guest threads to the PS4 cores they ask for (guest core i -> host logical CPU
  * i*GOW3_GUEST_CORE_STRIDE, default 2: one thread per physical core with SMT);
  * GOW3_GUEST_PRIORITY=1 maps PS4 priorities (256 high .. 767 low) to Windows ones. Both log the

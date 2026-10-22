@@ -117,10 +117,10 @@ void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info
                     return use.user->GetOpcode() == IR::Opcode::UnpackUint2x32;
                 };
                 // gow3 (GOW3_WAVE64_ALL_BALLOTS=1, test): every ballot, not only those unpacked
-                // directly. Uncharted 3's cloth solvers (cs 1c957b01, 809864d3) pass the EXEC
+                // directly. The cloth solvers (cs 1c957b01, 809864d3) pass the EXEC
                 // ballot and a compare ballot through SelectU64/BitwiseAnd64, park the upper half
                 // in a VGPR lane and later use it in a buffer offset: on 32-lane subgroups that
-                // half was 0 (Sully's shirt flashing as flat-coloured triangles on NVIDIA).
+                // half was 0 (cloth flashing as flat-coloured triangles on NVIDIA).
                 static const bool all_ballots = [] {
                     const char* env = std::getenv("GOW3_WAVE64_ALL_BALLOTS");
                     return env && env[0] == '1';

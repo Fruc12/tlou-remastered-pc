@@ -127,7 +127,7 @@ public:
     /// gow3: set on a shader capture worker while the GPU command thread waits for its job. The
     /// capture's guest reads (SRT walker) can fault on GPU-modified pages; such a fault must be
     /// handled inline like the GPU thread's own, since a readback sent to the GPU thread would
-    /// wait for the very thread that is waiting for this job (Uncharted 2 level-load deadlock).
+    /// wait for the very thread that is waiting for this job (a level-load deadlock).
     static inline thread_local bool capturing_for_gpu_thread = false;
 
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,

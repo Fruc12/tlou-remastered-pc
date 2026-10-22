@@ -103,8 +103,8 @@ struct Values {
     /// DLSS (gow3_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
     std::atomic<bool> dlss_supported{false};
     std::atomic<const char*> dlss_problem{nullptr};
-    /// Set by the renderer: temporal anti-aliasing can run in this game (Uncharted: the camera
-    /// from the motion blur's velocity pass; off with UNCHARTED_TEMPORAL_AA=0).
+    /// Set by the renderer: temporal anti-aliasing can run in this game (the camera from the
+    /// motion blur's velocity pass, in a game that has one).
     std::atomic<bool> temporal_aa_available{false};
 
     /// Controls (gow3gpu.h Gow3Controls; the menu's Controls tab). The maps are guarded by
@@ -124,7 +124,7 @@ struct Values {
     /// two SDL gamepad button names ("lefttrigger"/"righttrigger" for the triggers) joined by
     /// '+'; and the keyboard key that opens the menu (SDL key name). Guarded by ControlsMutex().
     std::string menu_pad = "lefttrigger+rightstick", menu_key = "Insert";
-    /// The games' own draw distances in percent (Uncharted 2 and 3, src/runtime_gamesettings.c):
+    /// The game's own draw distances in percent (src/runtime_gamesettings.c, not located yet):
     /// object fade distance, sun and point/spot light shadow distances.
     std::atomic<int> fade_distance{100}, sun_shadow_distance{100}, light_shadow_distance{100};
 

@@ -11,7 +11,7 @@
 namespace Shader::Gcn {
 
 // shadPS4 PR #5346 (CLAMP/LEGACY rcp/rsq/log without infinities): opt-in with
-// GOW3_CLAMP_LEGACY_MATH=1 until tested in all three games (it did not fix Uncharted 3's flicker).
+// GOW3_CLAMP_LEGACY_MATH=1 until tested more widely (it did not fix a cloth flicker).
 // Cached shaders do not record the switch: clear the pipeline cache when changing it.
 static bool ClampLegacyMath() {
     static const bool enabled = [] {
@@ -1045,7 +1045,7 @@ void Translator::V_EXP_F32(const GcnInst& inst) {
     SetDst(inst.dst[0], ir.FPExp2(src0));
 }
 
-// shadPS4 PR #5346 (gow3: Uncharted 3's single-frame flat-coloured shapes on NVIDIA): the
+// shadPS4 PR #5346 (gow3: single-frame flat-coloured shapes on NVIDIA): the
 // CLAMP/LEGACY variants never produce infinities on GCN.
 void Translator::V_LOG_CLAMP_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};

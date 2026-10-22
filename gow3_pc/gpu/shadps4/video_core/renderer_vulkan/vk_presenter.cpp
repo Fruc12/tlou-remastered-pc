@@ -170,7 +170,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     const bool capture_only = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARY_ISOLATED", false) &&
                               EmulatorSettingsImpl::Flag("GOW3_PIPELINE_CAPTURE_ONLY", false);
     // gow3 18 Oct 2026: the background warm-up also with pipeline binaries. On demand, each compute
-    // shader was translated on the GPU thread the first time a level used it: Uncharted 3 hitched
+    // shader was translated on the GPU thread the first time a level used it: a game hitched
     // 90-170 ms right after loading (35 compiles of 10-15 ms in 5 s); with the warm-up (2,440
     // pipelines in 16 s on background threads during the title screen) none were left in play.
     // GOW3_ON_DEMAND_PIPELINES=1 keeps the on-demand start.
@@ -678,7 +678,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                 // gow3 18 Oct 2026: while the command thread waits here for the GPU (up to a
                 // frame), readbacks whose GPU work is done land meanwhile, and with them the
                 // fences the guest waits for (ray-cast results). A plain wait held them until the
-                // whole frame was done: Uncharted 3 on the rooftops made two or three 5-7 ms
+                // whole frame was done: a rooftop level made two or three 5-7 ms
                 // frames, then one of 25-35 ms waiting for its ray casts (75 FPS, 1% lows 22 FPS
                 // at the 120 limit). GOW3_POLL_WHILE_WAITING=0 waits plainly (A/B).
                 static const bool poll_while_waiting = [] {
@@ -707,7 +707,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                     return on;
                 }();
                 // gow3 21 Oct 2026 (GOW3_WAIT_SERVICES_FAULTS=1, the CPU worker): guest fault
-                // requests queued while this wait runs are served here (Uncharted 2: read faults
+                // requests queued while this wait runs are served here (read faults
                 // waited ~10 ms each for the command thread, 20-38% of a guest thread): the wait
                 // goes in slices of at most 1 ms, re-checking the frame's tick after each slice
                 // and each served request (one may submit work), and lands readbacks as each

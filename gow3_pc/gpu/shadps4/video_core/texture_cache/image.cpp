@@ -176,7 +176,7 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
 namespace {
 /// gow3: images and their memory are freed on this thread instead of the GPU command thread.
 /// Freeing a dedicated allocation is a kernel call (D3DKMTDestroyAllocation2): about 3% of the
-/// GPU command thread in Uncharted 2 (18 Oct 2026). VMA is internally synchronized; nothing
+/// GPU command thread (18 Oct 2026). VMA is internally synchronized; nothing
 /// uses an image once its UniqueImage is gone. Opt-in (GOW3_IMAGE_REAPER=1): memory freed a
 /// little later could make an allocation within budget fail on a 4 GB GPU; no FPS gain measured.
 class ImageReaper {
@@ -277,7 +277,7 @@ void UniqueImage::Destroy() {
 namespace {
 /// gow3 18 Oct 2026: AMD's Windows driver takes ~170 ms to allocate a 256 MiB block of video
 /// memory (Radeon 780M), and VMA allocates a new block the moment an image no longer fits: the
-/// GPU thread stalled for 70-240 ms (Uncharted 2/3 hitches). This thread keeps room in reserve
+/// GPU thread stalled for 70-240 ms (hitches). This thread keeps room in reserve
 /// instead: when the memory types images use have no free range of 64 MiB left, it allocates a
 /// 64 MiB spare there (VMA makes a new block, with room for the next images) and frees the
 /// previous spare. GOW3_SPARE_IMAGE_BLOCK=0: off.
@@ -389,7 +389,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     const auto started = std::chrono::steady_clock::now();
     // gow3 18 Oct 2026: NVIDIA prefers (does not require) dedicated memory for render targets
     // and VMA honours that with a driver allocation per image: 4-21 ms per 960x540 target on the
-    // RTX 5060 Laptop, and Uncharted 2 creates one every few seconds (hitches). Images that only
+    // RTX 5060 Laptop, and a game may create one every few seconds (hitches). Images that only
     // prefer it go into VMA's device-local blocks like the rest (SpareBlockKeeper keeps room
     // there). GOW3_DEDICATED_IMAGES=1: VMA decides, as before.
     static const bool dedicated_images = [] {

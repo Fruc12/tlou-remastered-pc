@@ -446,12 +446,12 @@ private:
     std::optional<PendingDownload> RecordImageDownload(ImageId image_id);
 
     /// gow3 16 Oct: tiny GPU-written images (one row of at most 4 KiB, linear or a single texel)
-    /// go back to guest memory with the next end-of-pipe fence (ProcessTinyReadbacks). Uncharted 2
-    /// reads its aim focus distance from a 1x1 R32F render target; never copied back, it stayed 0
-    /// and everything behind Nate was blurred while aiming. The general deferred image readback
+    /// go back to guest memory with the next end-of-pipe fence (ProcessTinyReadbacks). A game may
+    /// read its aim focus distance from a 1x1 R32F render target; never copied back, it stayed 0
+    /// and everything behind the player was blurred while aiming. The general deferred image readback
     /// (GOW3_READBACK_LINEAR + GOW3_DEFERRED_READBACK) fixed it too, but a CPU read of a pending
-    /// copy made the game thread wait for the GPU (~50 times a second) and U2 asserted
-    /// m_gfxEopTick in FrameBegin. GOW3_TINY_IMAGE_READBACK=1: on (set for U2 by the launcher).
+    /// copy made the game thread wait for the GPU (~50 times a second) and the game asserted
+    /// m_gfxEopTick in FrameBegin. GOW3_TINY_IMAGE_READBACK=1: on.
     [[nodiscard]] bool IsTinyReadbackImage(const Image& image) const;
     void QueueTinyReadback(ImageId image_id, const Image& image);
     void ProcessTinyReadbacks();
@@ -520,7 +520,7 @@ private:
     std::chrono::steady_clock::time_point tiny_report{};
     const bool tiny_readbacks = [] {
         const char* value = std::getenv("GOW3_TINY_IMAGE_READBACK");
-        return value && value[0] == '1'; // on for Uncharted 2 (tools/probe_uncharted.py)
+        return value && value[0] == '1';
     }();
     u64 total_used_memory = 0;
     u64 gc_evictions = 0, gc_downloads = 0; ///< gow3: pressure report

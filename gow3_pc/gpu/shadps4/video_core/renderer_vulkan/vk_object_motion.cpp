@@ -232,7 +232,7 @@ void ObjectMotion::Attach(RenderState& state, u32 width, u32 height) {
 vk::ImageView ObjectMotion::PrepareRead(vk::CommandBuffer cmdbuf, u32 width, u32 height,
                                         bool& valid) {
     EnsureImage(std::max(image_width, 1u), std::max(image_height, 1u));
-    // The scene fills the top left of targets that can be larger (Uncharted's aligned ones).
+    // The scene fills the top left of targets that can be larger (aligned ones).
     valid = written && width <= image_width && height <= image_height &&
             (width == image_width || Shader::MotionVectors::stencil_gate) &&
             (height == image_height || Shader::MotionVectors::stencil_gate);

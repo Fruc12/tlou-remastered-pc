@@ -1,11 +1,11 @@
-"""Freeze reports for a running game (tools/probe_uncharted.py's hang watchdog), written from the
+"""Freeze reports for a running game (for a hang watchdog in the starting script), written from the
 launching process: safe while the game's own threads are stuck.
 
 thread_report(process): every thread's state and stack as text lines. Host frames come from
 Windows' stack walker (StackWalk64 with the modules' own unwind tables; no symbol files needed) as
 module+offset; guest code keeps frame pointers, so its frames follow the rbp chain as
 "guest 0x...". The offsets are symbolized later against the same build
-(llvm-addr2line -f -C -i -e Uncharted.exe 0x140000000+offset).
+(llvm-addr2line -f -C -i -e gow3_pc/out/gow3-probe.exe 0x140000000+offset).
 
 write_minidump(process, path): a Windows minidump (every thread's stack and registers; large,
 since the guest fibers' stacks are big allocations)."""

@@ -417,7 +417,7 @@ void AfterCopies(std::function<void()> callback) {
 void WaitAsync() {
     // The caller's own batch runs here: handing it over only to wait for it costs a wakeup.
     // gow3 17 Oct: GOW3_COPY_SPLIT_KB=n splits batches of n KiB or more with the copy threads.
-    // Off by default: Uncharted 3 at 4K measured no gain (62.6 vs 63.9 FPS); the copies there
+    // Off by default: at 4K it measured no gain (62.6 vs 63.9 FPS); the copies there
     // were mesh data copied on every bind (BufferCache::UseArenaForStatic removed them).
     static const unsigned long long split_bytes = [] {
         const char* env = std::getenv("GOW3_COPY_SPLIT_KB");

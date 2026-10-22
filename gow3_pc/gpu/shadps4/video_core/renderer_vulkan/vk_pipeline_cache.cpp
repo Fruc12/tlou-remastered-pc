@@ -679,10 +679,9 @@ bool PipelineCache::AsyncCompilation() const {
 
 namespace {
 // gow3: a draw whose color targets are all small (lookup tables, 1x1 luminance, the end of
-// downsample chains). Such draws are often made once: Uncharted's 256x8 light ramp is drawn at
+// downsample chains). Such draws are often made once: a 256x8 light ramp drawn at
 // load, and skipped while its pipeline compiled in the background the torch and flashlights lit
-// nothing for the whole session (Uncharted 1 got synchronous compilation for it, 14 Oct; U2
-// showed the same, 15 Oct). Compiling these at once costs a short stall the first time only.
+// nothing for the whole session (14-15 Oct). Compiling these at once costs a short stall the first time only.
 bool SmallTargetDraw(const AmdGpu::Regs& regs) {
     bool any = false;
     for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
@@ -1159,7 +1158,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
             module_related_pipelines[m].emplace_back(compute_key);
         }
         // gow3 20 Oct 2026 (GitHub #95): a shader that keeps making pipeline variants is named
-        // in the log. In 0.4.1 two effect shaders built ~10,000 compute pipelines over a U2
+        // in the log. In 0.4.1 two effect shaders built ~10,000 compute pipelines over a
         // session (RAM and video memory rising, the frame rate falling); the port normally holds
         // ~30. Logged at 100, 1,000 and 10,000 variants of one shader.
         static std::unordered_map<u64, u32> variants_per_shader;
@@ -1232,13 +1231,13 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb_binding; ++cb) {
             bound += (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) ? 1 : 0;
         }
-        // Uncharted: its G-buffer passes draw one target with the scene depth and write the
+        // G-buffer passes that draw one target with the scene depth and write the
         // stencil (characters set bit 1); the rasterizer picks the character draws.
-        const bool uncharted_gbuffer = Shader::MotionVectors::stencil_gate && bound >= 1 &&
+        const bool stencil_gbuffer = Shader::MotionVectors::stencil_gate && bound >= 1 &&
                                        regs.depth_control.stencil_enable &&
                                        regs.depth_control.depth_write_enable;
         motion_possible = Shader::MotionVectors::positions_address != 0 &&
-                          (bound >= 5 || uncharted_gbuffer) &&
+                          (bound >= 5 || stencil_gbuffer) &&
                           !regs.color_buffers[Shader::MotionVectors::Output] &&
                           regs.depth_buffer.DepthValid() &&
                           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
@@ -1271,7 +1270,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     if (motion_possible) {
         const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
         if (vs && Shader::MotionVectors::stencil_gate) {
-            sel.motion = true; // Uncharted: per draw (the stencil value it writes)
+            sel.motion = true; // per draw (the stencil value it writes)
         } else if (vs) {
             // Shaders with a bone palette (motion_history.h). Small skeletons (weapons,
             // props) also include static world pieces: the rasterizer gives those

@@ -39,7 +39,7 @@ struct PageState {
             } else if (delta == -1) {
                 // gow3 18 Oct 2026: a landing readback's read watch can outlive the page's
                 // state (reset when the range was unmapped or remapped meanwhile): the page is
-                // unwatched already, which is what the decrement wants. Was a fatal assert (U3,
+                // unwatched already, which is what the decrement wants. Was a fatal assert (
                 // Radeon 780M, once in ~4 minutes of play).
                 if (num_read_watchers == 0) {
                     static std::atomic<u32> logged{0};

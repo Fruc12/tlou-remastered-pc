@@ -156,7 +156,7 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
     };
 #ifdef _WIN32
     // gow3 17 Oct 2026: the patch below makes that load read 0 for good, so one walk of a table
-    // the game was still filling (a garbage pointer, seen once in Uncharted 3) broke the shader's
+    // the game was still filling (a garbage pointer, seen once) broke the shader's
     // resources for the rest of the session. The first faults at an instruction only skip the
     // load this time (register 0); it is patched once it keeps faulting (a real null pointer).
     {

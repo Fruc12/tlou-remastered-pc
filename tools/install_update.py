@@ -1,7 +1,7 @@
-"""Installs a game update from its PKG file (launcher -> Advanced -> Install game update; #32).
+"""Installs a game update from its PKG file.
 
-The update the player has (for example update 1.02's .pkg) is unpacked next to the game folder as
-`<game folder>-patch`, where tools/probe_uncharted.py finds it. The port ships no game files: this
+The update the player has (for example update 1.11's .pkg) is unpacked next to the game folder as
+`<game folder>-patch`, where tools/probe_tlou.py finds it. The port ships no game files: this
 only unpacks a file the player supplies, with PkgTool (LibOrbisPkg, LGPL-3.0, tools/pkgtool).
 
     python tools/install_update.py <update.pkg> <game folder>
@@ -21,10 +21,8 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 METADATA = {"PARAM_SFO": "param.sfo", "PLAYGO_CHUNK_DAT": "playgo-chunk.dat",
             "PLAYGO_CHUNK_SHA": "playgo-chunk.sha", "PLAYGO_MANIFEST_XML": "playgo-manifest.xml",
             "SHAREPARAM_JSON": "shareparam.json", "CHANGEINFO__CHANGEINFO_XML": "changeinfo/changeinfo.xml"}
-# What the port needs from update 1.02: the three games' executables and their new data.
-REQUIRED = ("eboot.bin", "big2-ps4_Shipping.elf", "big3-ps4_Shipping.elf", "sce_sys/param.sfo",
-            "u1data/data.psarc", "u2data/data.psarc", "u3data/data.psarc",
-            "u1data/build/main/bin.psarc", "u2data/build/main/bin.psarc", "u3data/build/main/bin.psarc")
+# What the port needs from the update (1.11): its executable and its data.
+REQUIRED = ("eboot.bin", "sce_sys/param.sfo", "patch.psarc")
 UPDATE_SUFFIXES = ("-patch", "-update", "_patch", "_update")
 
 
@@ -171,8 +169,8 @@ def inspect(pkg, game):
 
 
 def check_folder(folder, game):
-    """An update the player already extracted, anywhere (the launcher remembers it and passes it as
-    UNCHARTED_UPDATE): its uroot, after the same checks as a PKG's. The folder chosen may be the
+    """An update the player already extracted, anywhere (tools/probe_tlou.py takes it as
+    TLOU_UPDATE): its uroot, after the same checks as a PKG's. The folder chosen may be the
     update's root or its uroot."""
     folder = Path(folder)
     root = next((candidate for candidate in (folder / "uroot", folder)
@@ -250,16 +248,15 @@ def install(pkg, game, log=print):
     return target / "uroot"
 
 
-# The base game (version 1.00) from its PKG: the three executables and their data.
-BASE_REQUIRED = ("eboot.bin", "big2-ps4_Shipping.elf", "big3-ps4_Shipping.elf", "sce_sys/param.sfo",
-                 "u1data", "u2data", "u3data")
+# The base game (version 1.00) from its PKG: the executable and its data.
+BASE_REQUIRED = ("eboot.bin", "sce_sys/param.sfo", "data.psarc", "build")
 
 
 def install_game(pkg, parent, log=print):
-    """Unpacks the player's own base game PKG (for example the US copy, CUSA02320) into
-    <parent>/<title id> and returns its uroot, the folder the launcher uses as game folder. PkgTool
-    leaves out the PKG's metadata entries (param.sfo, playgo-chunk.dat, ...), which the launcher and
-    the update installer need, so they are added to sce_sys as for an update (20 Oct 2026: a base
+    """Unpacks the player's own base game PKG (for example the US copy, CUSA00552) into
+    <parent>/<title id> and returns its uroot, the folder tools/probe_tlou.py takes as --game. PkgTool
+    leaves out the PKG's metadata entries (param.sfo, playgo-chunk.dat, ...), which the preparation
+    scripts and the update installer need, so they are added to sce_sys as for an update (20 Oct 2026: a base
     unpacked by hand had none, and Install from .pkg refused it)."""
     pkg, parent = Path(pkg), Path(parent)
     listing = entries(pkg)
@@ -300,7 +297,7 @@ def install_game(pkg, parent, log=print):
                 run_tool("pkg_extractentry", pkg, listing[name][0], destination)
         missing = [name for name in BASE_REQUIRED if not (uroot / name).exists()]
         if missing:
-            raise UpdateError("This PKG is not The Nathan Drake Collection, or it is damaged: "
+            raise UpdateError("This PKG is not The Last of Us Remastered, or it is damaged: "
                               "missing " + ", ".join(missing))
         log("Putting it in place...")
         partial.rename(target)

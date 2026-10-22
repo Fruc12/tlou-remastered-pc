@@ -15,10 +15,10 @@ int main(void) {
     uintptr_t start=USER_MIN;
     Vma region={start,start+3*PAGE,KIND_DIRECT,0x33,0,0,"direct"};
     assert(!vma_insert(0,region));
-    assert(!set_range_name((void *)(start+PAGE),PAGE,"Uncharted heap"));
+    assert(!set_range_name((void *)(start+PAGE),PAGE,"game heap"));
     VirtualQueryInfo info;
     assert(!virtual_query((void *)(start+PAGE),0,&info,sizeof(info)));
-    assert(!strcmp(info.name,"Uncharted heap"));
+    assert(!strcmp(info.name,"game heap"));
     assert(info.start==start+PAGE && info.end==start+2*PAGE && info.offset==PAGE);
     assert(!virtual_query((void *)start,0,&info,sizeof(info)));
     assert(!strcmp(info.name,"direct"));

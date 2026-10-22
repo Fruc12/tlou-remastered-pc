@@ -66,8 +66,8 @@ __attribute__((constructor)) static void remember_start(void) {
         printf("Runtime: native TSC frequency %llu Hz (inline guest RDTSC)\n",(unsigned long long)native_tsc_hz);
         /* gow3 diagnostics (GOW3_TIME_SCALE=<factor> > 1): the TSC frequency reported to the game
          * is scaled, so its TSC clock runs that much slower. A slow diagnostic run (validation
-         * layers, captures) then looks like 60 FPS to the game: Uncharted 3's cloth flicker shows
-         * only above 30 FPS (16 Oct). Other clocks stay real time. */
+         * layers, captures) then looks like 60 FPS to the game: a cloth flicker showed only above
+         * 30 FPS (16 Oct). Other clocks stay real time. */
         const char *scale=getenv("GOW3_TIME_SCALE");
         if (scale && atof(scale)>1.0) {
             native_tsc_hz=(uint64_t)((long double)native_tsc_hz*atof(scale));

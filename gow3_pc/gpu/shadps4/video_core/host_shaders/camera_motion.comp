@@ -24,7 +24,7 @@ layout(push_constant) uniform Constants {
     vec2 size;         // pixels
     vec2 jitter;       // current viewport shift in render pixels (x right, y down)
     vec2 previous_jitter;
-    uint mode;         // motion: 1 = object motion vectors available, 2 = Uncharted's velocity
+    uint mode;         // motion: 1 = object motion vectors available, 2 = the game's velocity
                        // pass camera, 3 = none (zero), 4 = 2 with the object motion (characters);
                        // debug: 0 motion, 1 raw depth,
                        // 2 view z / 50, 3 reprojected previous frame, 4 |difference|
@@ -87,7 +87,7 @@ void main() {
 #else
     vec2 result = motion;
     if (mode == 2 || mode == 4) {
-        // Uncharted's camera velocity pass (CameraMotion::OnVelocityConstants): reproject holds
+        // The game's camera velocity pass (CameraMotion::OnVelocityConstants): reproject holds
         // the view to previous clip x, y, w rows; proj the view from uv; prev_proj.xy the view
         // z from depth.
         const float view_z = prev_proj.y / (depth - prev_proj.x);

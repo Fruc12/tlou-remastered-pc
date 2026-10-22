@@ -124,7 +124,7 @@ public:
     };
     bool DisplayOverride(VAddr address, Display& display);
 
-    /// gow3: Uncharted drawn below the output size (velocity mode, GOW3_RENDER_RES smaller than
+    /// gow3: a game drawn below the output size (velocity mode, GOW3_RENDER_RES smaller than
     /// GOW3_OUTPUT_RES, GOW3_UI_COMPOSITE_PS). The game copies its finished frame back into the
     /// display buffer with that pixel shader and draws the HUD and menus over it. That copy is
     /// replaced by the upscale into a host display buffer of the output size; the HUD and menu

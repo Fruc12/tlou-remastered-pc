@@ -79,7 +79,7 @@ struct PageManager::Impl {
 
     // gow3: GOW3_FAULT_STATS=1 prints, every 5 s, the CPU read faults on GPU-modified pages
     // (each one waits for the GPU and downloads a window): count and time by thread kind, and the
-    // hottest faulting instructions and 64 KiB windows. Input for frame drops (Uncharted temple).
+    // hottest faulting instructions and 64 KiB windows. Input for frame drops.
     static void NoteReadFault(void* context, VAddr addr, bool gpu_thread,
                               std::chrono::steady_clock::duration took, bool write = false) {
         static const bool enabled = [] {
@@ -155,7 +155,7 @@ struct PageManager::Impl {
             Gow3Stats::gpu_signal_faults.fetch_add(1, std::memory_order_relaxed);
         }
         // gow3 18 Oct 2026: an instruction that keeps faulting on one page never gets past it
-        // (Uncharted 3 rooftops: a read-modify-write into a page a readback still protected, the
+        // (a rooftop level: a read-modify-write into a page a readback still protected, the
         // game frozen; shorter loops were hitches). After 4 faults in a row on the same page the
         // readbacks holding it land (Rasterizer::ReleaseStuckPage).
         thread_local VAddr last_fault_page = 0;
@@ -168,7 +168,7 @@ struct PageManager::Impl {
                    self->cached_pages[addr >> PM_PAGE_BITS].num_read_watchers != 0) {
             // (Only guest addresses: the SRT walker's garbage pointers fault at -1, reported for
             // non-canonical addresses; indexing the page table with that faulted inside this
-            // handler, again and again: Uncharted 3 froze, 18 Oct evening.)
+            // handler, again and again: the game froze, 18 Oct evening.)
             // Only a read-protected page (a readback holds it) can keep an instruction faulting;
             // write faults repeat on hot pages the GPU keeps writing (not stuck).
             fault_repeats = 0;

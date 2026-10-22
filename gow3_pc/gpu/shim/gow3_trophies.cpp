@@ -59,13 +59,8 @@ bool ReadIndex(const std::string& path) {
     return ok && !entries.empty();
 }
 
-std::string GameName(int list) {
-    switch (list) {
-    case 1: return "Uncharted: Drake's Fortune";
-    case 2: return "Uncharted 2: Among Thieves";
-    case 3: return "Uncharted 3: Drake's Deception";
-    default: return "Uncharted";
-    }
+std::string GameName(int /*list*/) {
+    return "The Last of Us Remastered";
 }
 
 bool IsEarned(const u32 bits[4], int id) {

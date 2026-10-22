@@ -300,7 +300,7 @@ extern "C" int gow3gpu_camera_yaw(float* yaw_degrees, double* age_seconds) {
 }
 
 void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
-    // Uncharted's camera velocity pass (its pixel shader, read from the shader dump):
+    // The game's camera velocity pass (its pixel shader, read from the shader dump):
     //   z = c9 / (depth - c8), view = (z (c0 u + c2), z (c1 v + c3), z)
     //   p = M view + t (M, t: rows c12..c23; pixels with stencil bits 0xc0 add c56..c58)
     //   previous clip x, y, w = rows c40..c43, c44..c47, c52..c55 applied to (p, 1)

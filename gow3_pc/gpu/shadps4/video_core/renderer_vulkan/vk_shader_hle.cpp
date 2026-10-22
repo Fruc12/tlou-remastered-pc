@@ -244,9 +244,9 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     return true;
 }
 
-// gow3: Uncharted's constant copies. Disassembled (bin.psarc):
+// gow3: Naughty Dog's constant copies. Disassembled (bin.psarc):
 //   cs 2d215c3b: i = group                  (one dword per workgroup)
-//   cs 6a6422a9: i = group * 64 + thread    (64 dwords per workgroup, U2)
+//   cs 6a6422a9: i = group * 64 + thread    (64 dwords per workgroup)
 //   v = buffer_load_format_x(s[0:3], i); if (i < s6) buffer_store_format_x(s[4:7], i, v)
 // Loads past src.num_records read 0, stores past dst.num_records are dropped. Done here, the
 // result is in guest memory at once (the CPU-side SRT walker reads these constant blocks) and in
@@ -254,7 +254,7 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
 // game's later CPU writes into the per-frame ring need no download. Before 15 Oct the count
 // ignored s6 (elements past it were overwritten) and only 2d215c3b was handled.
 // GOW3_SCALAR_COPY_GPU=1 keeps the GPU copy.
-// The Last of Us Remastered compiles the same two shaders as cs 3f8bac22 (one dword per
+// The Last of Us Remastered compiles these two shaders as cs 3f8bac22 (one dword per
 // workgroup) and cs 82c46b8b (64). Its skinned meshes (the title screen's ivy, Sarah's blanket)
 // read their normal matrix from a block 3f8bac22 copies: done on the GPU, the walker read zeros,
 // the normals came out NaN and those surfaces were drawn flat, without lighting (21 Oct 2026).
@@ -371,9 +371,9 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
     };
     // GOW3_SCALAR_COPY_GPU: every scalar copy on the GPU; =1 only the one-per-group one
     // (2d215c3b). The 64-wide one (6a6422a9) runs on the GPU unless GOW3_SCALAR_COPY64_CPU=1:
-    // Uncharted 2 copies data with it that it completes after queueing the frame (the player's;
-    // the CPU copy, made when the command is processed, read it early: Nate was drawn floating
-    // or not at all, 15 Oct).
+    // a game copies data with it that it completes after queueing the frame (the player's;
+    // the CPU copy, made when the command is processed, read it early: the player was drawn
+    // floating or not at all, 15 Oct).
     static const int keep_gpu = [] {
         const char* env = std::getenv("GOW3_SCALAR_COPY_GPU");
         if (env) {

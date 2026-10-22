@@ -90,8 +90,8 @@ struct IrqController {
     }
 
     /// gow3 18 Oct 2026: Signal on the interrupt delivery thread, in the order queued. The
-    /// handlers wake the guest's interrupt threads (equeue events, a kernel call each): Uncharted
-    /// 3 raises ~2,200 compute interrupts a frame, which the GPU command thread paid for. Labels
+    /// handlers wake the guest's interrupt threads (equeue events, a kernel call each): a game
+    /// can raise ~2,200 compute interrupts a frame, which the GPU command thread paid for. Labels
     /// and fences are written before the interrupt is queued, as before. Signals
     /// in place (the default: no measured gain on 4 or 16 cores, 18 Oct; GOW3_ASYNC_IRQ=1 on).
     void SignalAsync(InterruptId irq) {

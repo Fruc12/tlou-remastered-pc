@@ -66,7 +66,7 @@ native=next(m for m in modules if m.name.lower()=="gow3-probe.exe")
 symbols=subprocess.check_output(["C:/msys64/clang64/bin/llvm-nm.exe",str(ROOT/"gow3_pc/out/gow3-probe.exe")],text=True)
 
 
-log=(ROOT/'analysis/uncharted/boot.log').read_text(errors='replace')
+log=(ROOT/'analysis/tlou/boot.log').read_text(errors='replace')
 base=int(re.search(r'Guest image base: ([\da-fA-F]+)',log)[1],16)
 print('Audio globals',struct.unpack('<8f',read(base+0x10fddf8+0x3db20,32)))
 sample=json.loads((ROOT/'analysis/thread-sample.json').read_text())

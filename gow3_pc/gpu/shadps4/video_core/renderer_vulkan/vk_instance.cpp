@@ -594,7 +594,7 @@ bool Instance::CreateDevice() {
     // gow3 20 Oct 2026: and a third one for presents (Swapchain::Present). Presenting on the
     // graphics queue had to hold the submit lock, and on a hybrid laptop (NVIDIA GPU renders, the
     // Radeon 780M drives the screen, the frame is copied across) a present that blocked held up
-    // every submission of the GPU command thread: 0.3-0.8 s freezes in Uncharted 1 and 3, the
+    // every submission of the GPU command thread: 0.3-0.8 s freezes, the
     // thread neither idle nor in any counted wait. GOW3_PRESENT_QUEUE=0: presents on the
     // graphics queue, as before.
     static const bool present_queue_wanted = [] {
@@ -610,7 +610,7 @@ bool Instance::CreateDevice() {
         .queueCount = queue_count,
         .pQueuePriorities = queue_priorities.data(),
     }};
-    // gow3 19 Oct 2026, from Supermedo/uncharted_pc #94: sparse binds (buffer arenas) need a
+    // gow3 19 Oct 2026: sparse binds (buffer arenas) need a
     // queue whose family supports them. On Steam Deck (RADV) the graphics family does not, and
     // vkQueueBindSparse there was invalid (device lost). A family that does gets a queue of its
     // own; without one, the graphics queue is used as before.

@@ -190,7 +190,7 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
 }
 
 // gow3: a buffer format the hardware cannot have (block-compressed or packed texture formats,
-// float 8-bit or integer 10_11_11, image-only number formats): the sharp is garbage. Uncharted's
+// float 8-bit or integer 10_11_11, image-only number formats): the sharp is garbage. Naughty Dog's
 // effect compute shader (cs 8f067540) is bound with descriptor slots it does not use for some
 // effects (treasure pickup and treasure viewer); the GPU ignores them, the recompiler stopped.
 static bool IsUsableBufferFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {

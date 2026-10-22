@@ -213,7 +213,7 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
         enabled = false;
     }
     Gow3Settings::Get().temporal_aa_available = enabled && trigger_hash != 0;
-    // Uncharted below the output size (see OnComposite).
+    // Games drawn below the output size (see OnComposite).
     if (const char* ps = std::getenv("GOW3_UI_COMPOSITE_PS")) {
         composite_ps = u32(std::strtoull(ps, nullptr, 16));
     }
@@ -322,8 +322,8 @@ bool TemporalUpscaler::OnFrameStart() {
     const auto& settings = Gow3Settings::Get();
     // The guest's startup resolution patch remains in effect until restart. Keep the FSR
     // model at the applied preset while the menu saves the requested one for run.sh.
-    // Velocity mode (Uncharted) runs at the game's own (patched) size: anti-aliasing (Native AA)
-    // only, as in the reference port; below the output size the preset (FSR 4's model) follows
+    // Velocity mode runs at the game's own (patched) size: anti-aliasing (Native AA)
+    // only; below the output size the preset (FSR 4's model) follows
     // the scale: 1.5 Quality, 1.7 Balanced, 2 Performance, more Ultra Performance.
     // By the height: ultrawide widths are rounded to steps of 8.
     const float scale = float(target_height) / float(std::max(1u, render_height));
@@ -1226,7 +1226,7 @@ void TemporalUpscaler::Run() {
         if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
             ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
         }
-        // gow3: GOW3_DUMP_TRIGGER also dumps native anti-aliasing (Uncharted): its input, motion
+        // gow3: GOW3_DUMP_TRIGGER also dumps native anti-aliasing: its input, motion
         // vectors, result and depth, before the result replaces the scene color.
         if (const int dump = DumpFrame(); dump >= 0) {
             DumpImages(instance, scheduler, cmdbuf, dump,
@@ -1360,7 +1360,7 @@ bool TemporalUpscaler::Scaled() const {
 
 void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
     if (composite_frames) {
-        // Uncharted: the copy of the finished frame (RGBA8 at the render size) that the composite
+        // The copy of the finished frame (RGBA8 at the render size) that the composite
         // draw puts back into the display buffer; also in menus without a 3D scene.
         const auto& image = texture_cache.GetImage(color);
         if (image.info.pixel_format == vk::Format::eR8G8B8A8Unorm &&
@@ -2097,7 +2097,7 @@ bool TemporalUpscaler::OnComposite(u64 ps_hash, VideoCore::ImageId color) {
     if (!composite_frames || !color) {
         return false;
     }
-    // The tonemap draw finishes the frame in its target; Uncharted 3 then draws world-anchored
+    // The tonemap draw finishes the frame in its target; a game may then draw world-anchored
     // prompts (the journal, the d-pad) into it before the copies. The draw after the tonemap
     // upscales the clean frame, so those prompts are drawn over it at the output size.
     if (tonemap_pending) {

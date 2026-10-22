@@ -161,8 +161,8 @@ public:
     /// gow3 16 Oct: windows cool down 3 s after the last such CPU write (GOW3_HOT_WINDOW_TTL=<s>;
     /// 0 keeps them hot for good). Kept hot, every window the effect shaders (cs 8f067540,
     /// 7d7e7206) ever shared with the CPU was read back whole after each submission although the
-    /// CPU no longer touched it: ~500 MB/s in Uncharted 2 and 3 (the CPU reads none of it, precise
-    /// readback statistics). The cooldown was once blamed for Uncharted 2's floating NPCs; that
+    /// CPU no longer touched it: ~500 MB/s (the CPU reads none of it, precise
+    /// readback statistics). The cooldown was once blamed for floating NPCs; that
     /// was the 6a6422a9 copies (now EOP readbacks), and the NPCs stand on the floor with it.
     [[nodiscard]] bool IsCpuWriteHot(VAddr address, u64 size) const {
         if (cpu_write_hot.empty()) {
@@ -196,7 +196,7 @@ public:
 
     /// gow3: IsRangeGpuWritten from the GPU command thread while the draw recording thread may
     /// change the set (multithreaded rendering: SRT sync before a walk). The set is not thread
-    /// safe: a lookup during an update followed a freed node (Uncharted 3 crashed within minutes).
+    /// safe: a lookup during an update followed a freed node (a crash within minutes).
     [[nodiscard]] bool IsRangeGpuWrittenShared(VAddr address, u64 size) const {
         if (!MayBeGpuWritten(address, size)) {
             return false;
@@ -207,7 +207,7 @@ public:
 
     /// gow3 17 Oct 2026: false when no GPU write ever reached a 64 KiB window of the range (one
     /// bit per window, set by GpuRangesAdd and never cleared): lock-free. The SRT walk checked
-    /// every table of every draw under the set's lock (~5% of Uncharted 3's GPU command thread).
+    /// every table of every draw under the set's lock (~5% of the GPU command thread).
     [[nodiscard]] bool MayBeGpuWritten(VAddr address, u64 size) const {
         if (size == 0) {
             return false;
@@ -239,7 +239,7 @@ public:
 
     /// gow3: the runtime writes [address, address + size) through the backing view (fence
     /// labels): the bytes stop being GPU data, and pending readbacks do not bring older GPU
-    /// values back over them. Uncharted 2: a ray-cast readback covering the frame's end-of-pipe
+    /// values back over them: a ray-cast readback covering the frame's end-of-pipe
     /// label restored its old value (assert m_gfxEopTick in FrameBegin).
     void NoteCpuWrite(VAddr address, u64 size);
 
@@ -271,7 +271,7 @@ public:
 
     /// gow3 diagnostics (GOW3_CLOTH_PEEK=1): copies the GPU's data of [address, size) into a
     /// staging buffer (guest memory untouched); PollPeeks scans finished copies for exploded
-    /// floats (Uncharted 3's cloth flicker, 16 Oct).
+    /// floats (a cloth flicker, 16 Oct).
     void PeekGpuRange(VAddr address, u64 size, u64 tag, u32 slot, u64 dispatch = 0, u32 phase = 1);
     /// The same for the exact buffer a shader binds (an arena or the stream buffer).
     void PeekGpuBuffer(const Buffer* source, u64 offset, VAddr address, u64 size, u64 tag, u32 slot,
@@ -446,7 +446,7 @@ private:
             }
         }
         std::unique_lock lock{gpu_ranges_mutex};
-        // gow3 20 Oct 2026 (laptop CPUs): Uncharted 3 dispatches ~1,300 compute jobs a frame,
+        // gow3 20 Oct 2026 (laptop CPUs): a game may dispatch ~1,300 compute jobs a frame,
         // most writing the ranges they wrote before; adding a range the set already holds cost
         // the GPU command thread ~2.3% on a Ryzen 7840HS (laptop, 47 FPS CPU-bound),
         // and the window ticks of a range already noted in this submission ~1.4%. A small cache
@@ -513,7 +513,7 @@ private:
     vk::UniqueCommandPool urgent_pool;
     vk::CommandBuffer urgent_cmd;
     /// gow3: timeline semaphore the side queue signals per fetch (no fence to reset: on AMD's
-    /// Windows driver vkResetFences is a kernel call, ~6% of the U3 command thread).
+    /// Windows driver vkResetFences is a kernel call, ~6% of the command thread).
     vk::UniqueSemaphore urgent_timeline;
     u64 urgent_value = 0;
     void GpuRangesSubtract(VAddr address, u64 size) {
@@ -558,7 +558,7 @@ private:
 
 
     // gow3: a CPU write into a page with GPU-written bytes used to download the page with a full
-    // GPU wait (~800 per 5 s in the U1 temple, half the frame time). The writes never hit the
+    // GPU wait (~800 per 5 s in a heavy scene, half the frame time). The writes never hit the
     // GPU-written bytes themselves, so the page is unprotected without a download instead. The
     // guest copy of the GPU-written bytes stays stale and is recorded here; uploads leave those
     // bytes out and downloads fill them in. A guest byte that differs from its record was
@@ -675,7 +675,7 @@ private:
     RangeSet open_readback_ranges;
     /// gow3: pages where a CPU read faulted on other data than a pending readback's GPU bytes
     /// (false sharing: the CPU's own data next to small GPU results in the same 4 KiB) -> until
-    /// when async readbacks leave them unprotected. Uncharted 2: 89% of the read faults, each one
+    /// when async readbacks leave them unprotected: 89% of the read faults, each one
     /// waiting ~14 ms for the GPU thread and the GPU.
     std::unordered_map<u64, std::chrono::steady_clock::time_point> noisy_pages;
     /// Stops read-protecting one page for every pending readback (a false-sharing read).
@@ -699,7 +699,7 @@ public:
     /// The readback a deferred fence at `address` (4 bytes) waits for. A GPU wait (WAIT_REG_MEM)
     /// on such a fence lands that readback first (LandReadbacks), as the GPU would execute the
     /// fence before the wait. Counting the value as written instead let the GPU thread run past
-    /// waits the guest relies on (Uncharted 2 read a command buffer before it was written).
+    /// waits the guest relies on (a game read a command buffer before it was written).
     [[nodiscard]] bool DeferredFenceTick(VAddr address, u64& tick, u32* value = nullptr) const;
     /// gow3 diagnosis: GPU data or a readback in flight in [address, address + size).
     [[nodiscard]] u64 PendingReadbackTickFor(VAddr address, u64 size) const {
@@ -746,7 +746,7 @@ private:
     /// command thread checks for them (it drains that thread before touching the rest).
     std::atomic<u32> deferred_signals{0};
     /// gow3: readback pieces that landed (address -> size, when): a piece read back again at the
-    /// same address and size within RecurringWindow is a recurring GPU result (Uncharted's
+    /// same address and size within RecurringWindow is a recurring GPU result (a
     /// 16-byte luminance at a fixed address, read by the CPU every frame). Its previous value,
     /// one frame old as on the console where the GPU runs behind, stays readable: no read
     /// protection. New pieces (ring memory reused for other data) are protected, so a CPU read

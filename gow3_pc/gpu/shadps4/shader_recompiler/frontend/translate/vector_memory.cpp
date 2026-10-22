@@ -233,7 +233,7 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     buffer_info.pc.Assign(pc);
 
     // gow3: MUBUF ADDR64 (gfx7): the 64-bit address in vaddr..vaddr+1 is added to the V# base
-    // (usually 0) and the offsets, i.e. a raw guest memory load. Uncharted's character, hair and
+    // (usually 0) and the offsets, i.e. a raw guest memory load. Naughty Dog's character, hair and
     // transparent shaders read their shadow cascade matrices this way (base + 192 * cascade);
     // taken as a buffer offset they read garbage and the shadow lookups landed in lit texels.
     // The loads go through the direct memory path (ReadConst with a computed address).

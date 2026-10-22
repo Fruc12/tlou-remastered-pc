@@ -28,7 +28,7 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
         border_color = vk::BorderColor::eFloatOpaqueBlack;
     }
 
-    // gow3 20 Oct 2026 (GitHub #56, Uncharted 2 on a Radeon 780M): a sampler asked for a custom
+    // gow3 20 Oct 2026 (a Radeon 780M): a sampler asked for a custom
     // border color while the border color table's address was 0: the colour was read at
     // 0 + index * 16 and the port stopped (read access to 0xe4a0). It is now read through the
     // backing view (no fault); no table, or none mapped there: transparent black.

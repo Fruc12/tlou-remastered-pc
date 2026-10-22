@@ -815,8 +815,8 @@ static void QueueFlipInOrder(Vulkan::Rasterizer& rasterizer, const u8* data) {
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
     // gow3 diagnostics (GOW3_FINISH_AT_FLIP=1): the GPU finishes all work before each flip, so the
-    // GPU work of consecutive frames never overlaps (Uncharted 3's cloth flicker shows only above
-    // 30 FPS, 16 Oct).
+    // GPU work of consecutive frames never overlaps (a cloth flicker showed only above 30 FPS,
+    // 16 Oct).
     static const bool finish_at_flip = [] {
         const char* env = std::getenv("GOW3_FINISH_AT_FLIP");
         return env && env[0] == '1';
@@ -857,7 +857,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     };
     // gow3 16 Oct: a fence deferred until its ray-cast results are back (RunEventWriteEop) comes
     // before this frame's flip, as on the console: the guest takes a finished flip as its frame's
-    // end-of-pipe being done (Uncharted 2 asserted m_gfxEopTick in FrameBegin when the flip came
+    // end-of-pipe being done (the game asserted m_gfxEopTick in FrameBegin when the flip came
     // first). Presenting waits for the frame's GPU work anyway, so this costs no frame rate.
     // GOW3_DEFER_FLIPS=0: queued at once.
     static const bool defer_flips = [] {
@@ -868,7 +868,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     // gow3 16 Oct: with multithreaded rendering (draw pipeline) end-of-pipe fences are written by
     // the Vulkan recording thread after the copies before them (RunEventWriteEop, RecorderFences),
     // later than this point on the GPU command thread. Queued at once, the flip overtook its
-    // frame's fence, the guest went on (a finished flip means its frame is done) and Uncharted 3
+    // frame's fence, the guest went on (a finished flip means its frame is done) and the game
     // asserted m_gfxEopTick of frame N-3 in FrameBegin within a minute. The flip now goes through
     // the draw pipeline in stream order and is queued after the fences recorded before it.
     if (defer_flips && rasterizer.DrawPipeActive()) {
@@ -930,7 +930,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // until its slot; slots advance by one period (no drift) but never lag behind by more.
     // gow3: the in-game menu changes the limit live (Gow3Settings::fps_limit); GOW3_FPS_LIMIT
     // and the uncapped presets keep their fixed limit.
-    // Uncharted: the menu's limit also applies with the frame rate unlocked (GOW3_VBLANK_HZ=0,
+    // The menu's limit also applies with the frame rate unlocked (GOW3_VBLANK_HZ=0,
     // 480 Hz vblank); only an explicit GOW3_FPS_LIMIT fixes it.
     const bool fixed_limit = std::getenv("GOW3_FPS_LIMIT") != nullptr;
     const auto current_limit = [&] {
@@ -980,9 +980,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         return base_period;
     };
 
-    // gow3 (after the reference Uncharted port): prerecorded movies (the Collection's cutscenes)
+    // gow3: prerecorded movies (cutscenes)
     // show one video frame per vblank of a 60 Hz display; with the frame rate unlocked (480 Hz
-    // vblank) they played too fast and out of sync with their sound (user, Uncharted 3, 18 Oct).
+    // vblank) they played too fast and out of sync with their sound (user, 18 Oct).
     // While a movie is being decoded the guest gets vblanks and flips at 60 Hz; gameplay keeps
     // the configured rate.
     constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};

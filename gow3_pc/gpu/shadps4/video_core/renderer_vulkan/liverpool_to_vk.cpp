@@ -427,7 +427,7 @@ vk::ComponentSwizzle ComponentSwizzle(AmdGpu::CompSwizzle comp_swizzle) {
         return vk::ComponentSwizzle::eA;
     default:
         // gow3: the reserved values (2, 3) come only from garbage T#s (unused resource table
-        // slots: Uncharted 2's treasure effects); they read zero instead of stopping.
+        // slots: treasure effects); they read zero instead of stopping.
         return vk::ComponentSwizzle::eZero;
     }
 }
@@ -793,7 +793,7 @@ vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat nu
         return result;
     }
     // gow3: a format pair no hardware has comes from a garbage sharp (an unused descriptor slot:
-    // Uncharted's treasure viewer and pickup effect, cs 8f067540). The GPU never reads it; the
+    // the treasure viewer and pickup effect, cs 8f067540). The GPU never reads it; the
     // closest valid format of that layout keeps the port running instead of stopping it.
     static std::atomic<int> warnings{0};
     if (warnings.fetch_add(1, std::memory_order_relaxed) < 16) {

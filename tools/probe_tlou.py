@@ -178,6 +178,12 @@ def main():
     # parallel, before the GPU command thread reaches their draws (an empty cache: 573 -> 167 ms
     # of compiling on that thread). The first visit of an area hitches less.
     env.setdefault("GOW3_PREFETCH_PIPELINES", "1")
+    # Memory waits met by a fence still queued for the draw recording thread, nested compute
+    # buffers and compute memory waits do not drain the draw pipe (in the heavy part of the house
+    # the GPU command thread waited for that thread 47% of its time). The player's choice (22 Oct
+    # 2026) after playing it: it felt smoother there; the measured runs saw different parts of
+    # the scene, so no clean number.
+    env.setdefault("GOW3_FEWER_DRAINS", "1")
     env.setdefault("GOW3_NATIVE_TSC", "1")
     env.setdefault("GOW3_FRAME_STATS", "1")
     # Scripted controller input (tools/tlou_pad.py writes it).

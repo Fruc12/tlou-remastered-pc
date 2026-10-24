@@ -458,11 +458,42 @@ static void touch_for_write(void *buffer,uint64_t size) {
         *b=*b;
     }
 }
+/* gow3 23 Oct 2026: the game streams its areas through these reads (an NPC fell through a floor
+ * once, maybe one whose collision came late from a hard disk). Every 5 s with reads: their
+ * count, size and time, the slowest, and the time spent faulting in write-protected pages of the
+ * destination; a read over 100 ms is logged with its file (the first 64). */
+static pthread_mutex_t read_stats_lock=PTHREAD_MUTEX_INITIALIZER;
+static uint64_t stat_reads, stat_bytes, stat_ns, stat_touch_ns, stat_max_ns, stat_since, slow_logged;
+static uint64_t file_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec; }
+static void note_read(int fd,uint64_t started,uint64_t touched,int64_t n) {
+    uint64_t now=file_now_ns(), ns=now-started;
+    pthread_mutex_lock(&read_stats_lock);
+    if (!stat_since) stat_since=started;
+    ++stat_reads; stat_bytes+=n>0 ? (uint64_t)n : 0; stat_ns+=ns; stat_touch_ns+=touched-started;
+    if (ns>stat_max_ns) stat_max_ns=ns;
+    if (ns>100000000u && slow_logged<64) {
+        ++slow_logged;
+        File *f=get(fd);
+        printf("Slow file read: %.0f ms for %.1f KiB (%.0f ms faulting in its pages) from %s\n",ns/1e6,
+               n>0 ? n/1024.0 : 0.0,(touched-started)/1e6,f ? f->path : "?");
+    }
+    if (now-stat_since>=5000000000u) {
+        printf("File reads (5 s): %llu reads, %.1f MiB in %.0f ms (%.1f MiB/s while reading), slowest "
+               "%.0f ms; %.0f ms faulting in write-protected pages\n",(unsigned long long)stat_reads,
+               stat_bytes/1048576.0,stat_ns/1e6,stat_ns ? stat_bytes/1048576.0/(stat_ns/1e9) : 0.0,
+               stat_max_ns/1e6,stat_touch_ns/1e6);
+        stat_reads=stat_bytes=stat_ns=stat_touch_ns=stat_max_ns=0; stat_since=now;
+    }
+    pthread_mutex_unlock(&read_stats_lock);
+}
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    uint64_t started=file_now_ns();
     touch_for_write(buffer,size);
+    uint64_t touched=file_now_ns();
     ssize_t n=host_read(h,buffer,size);
+    note_read(fd,started,touched,n);
     if (file_traced(fd) && file_trace_line())
         printf("File trace: read(fd %d, %llu) -> %lld (errno %d)\n",fd,(unsigned long long)size,(long long)n,n<0 ? errno : 0);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
@@ -472,8 +503,11 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
 static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    uint64_t started=file_now_ns();
     touch_for_write(buffer,size);
+    uint64_t touched=file_now_ns();
     ssize_t n=pread(h,buffer,size,offset);
+    note_read(fd,started,touched,n);
     if (file_traced(fd) && file_trace_line())
         printf("File trace: pread(fd %d, %llu @%lld) -> %lld (errno %d)\n",fd,(unsigned long long)size,
                (long long)offset,(long long)n,n<0 ? errno : 0);

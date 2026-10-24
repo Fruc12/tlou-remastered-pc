@@ -16,8 +16,9 @@ prologue in Sarah's house, which renders correctly (lighting, skinned characters
 - **Frame rate:** about 47 FPS in Sarah's bedroom and 48-53 FPS walking upstairs on a laptop with
   a GTX 1050 Ti Mobile (4 GB), where the GPU is the limit.
 - **Known issues:** the HUD of the item inspection screen does not show; Sarah's hair sometimes
-  stretches (not reproduced yet). With one frame in flight (the default) a checkpoint load froze
-  twice in about 16 tries before a safeguard was added; if a load ever hangs, start with
+  stretches (not reproduced yet). A frame that compiles many new shaders can pause the game for
+  a few seconds: the game's own frame watchdog stopped it after 2 s, and is now patched to 20 s
+  (`TLOU_FIXES=none` leaves the game unpatched). If a load ever hangs, start with
   `GOW3_FRAMES_IN_FLIGHT=0` (slower).
 - **Not available for this game yet:** mouse camera (the mouse drives the right stick instead),
   the draw distance sliders and keyboard button prompts, which need the game's own camera code,
@@ -40,9 +41,19 @@ prologue in Sarah's house, which renders correctly (lighting, skinned characters
 2. Build the runtime (below), then start the game with `Start-TLOU.cmd`, or
    `python tools/probe_tlou.py --boot --seconds 0 [--game <game folder>]`.
 3. Saves and settings stay in `analysis/tlou-user`; the log is `analysis/tlou/boot.log`.
+4. With this repository on a hard disk, put the shader cache (`analysis/tlou-user/cache`, about
+   700 MB) on an SSD: each new area loads hundreds of its files, and on a hard disk that pauses
+   the game for seconds. With the game closed, move the folder, then link it back:
+   `mklink /J analysis\tlou-user\cache <folder on the SSD>` (in `cmd`).
 
 The in-game menu (Insert, or R3+L2 on a controller) holds the graphics, controls and frame rate
 settings.
+
+**Without a DualShock 4:** the touchpad (backpack, crafting) is Tab / Backspace on the keyboard
+or Back/View on an Xbox-style controller. Shaking the controller is G on the keyboard or the
+Share/Capture button (`GOW3_KEY_MAP` / `GOW3_PAD_MAP` `shake=...` rebind it). The flashlight
+never flickers out by default, so it needs no shake: Celogamez's GoldHEN cheat "Flashlight Does
+Not Turn Off" (`TLOU_CHEATS=none` turns it off).
 
 ## Building
 

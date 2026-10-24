@@ -92,6 +92,68 @@ def convert_frames(capture):
     print(f"Frames: {capture}")
 
 
+# Changes to the game's executable before it starts: per change, image offsets (eboot vaddr), the
+# bytes that must be there, and the bytes written instead (None: only checked).
+# Cheats from the GoldHEN cheat repository, by Celogamez: json/CUSA00552_01.11.json
+# (https://github.com/GoldHEN/GoldHEN_Cheat_Repository).
+CHEATS = {
+    # "Flashlight Does Not Turn Off": the flashlight's battery store (vmovss [r13+0x7d4], xmm2)
+    # writes xmm1, the level before the drain, so the flashlight never flickers and needs no shake
+    # of a DualShock 4's motion sensors. The cheat jumps to a code cave holding that instruction;
+    # it is the same length, so it is written in place.
+    "flashlight": [(0x697B98, "C4C17A1195D4070000", "C4C17A118DD4070000")],
+}
+# Fixes, on in every run.
+FIXES = {
+    # 23 Oct 2026 (the house, after the autosave before the basement): the renderer's frame
+    # watchdog (ndgi-orbis-device.cpp WaitOnContextDone) halted the game when a frame took over 2 s
+    # on the GPU. There the GPU command thread created ~150 new pipelines inside one frame (stack: a
+    # DRAW_INDEX_OFFSET_2 opening a pipeline cache file on a hard disk). The compare (vucomiss
+    # xmm0, [2.0f]) and its message (vmovsd xmm0, [2.0]) read a 20.0 of the read-only image
+    # instead: a compile burst is a pause, a real GPU hang still stops the game.
+    "frame-timeout": [(0xB3D887, "C5F82E05819F6300", "C5F82E05194D5C00"),
+                      (0xB3D92F, "C5FB1005F19E6300", "C5FB1005A13D5900"),
+                      (0x11025A8, "0000A041", None), (0x10D16D8, "0000000000003440", None)],
+}
+
+
+def image_patches(elf_path, out_path, patches):
+    """Writes the chosen changes ({name: changes}, from CHEATS and FIXES) as a G3PATCH2 file for
+    the runtime's --patches (src/probe.c apply_patches) and returns its path, or None. A change
+    whose original bytes are not in this executable (another version) is left out with a message."""
+    import struct
+    elf = elf_path.read_bytes()
+    phoff, = struct.unpack_from("<Q", elf, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", elf, 0x36)
+    segments = []
+    for i in range(phnum):
+        kind, _, offset, vaddr, _, filesz, _, _ = struct.unpack_from("<IIQQQQQQ", elf, phoff + i * phentsize)
+        if kind == 1:
+            segments.append((vaddr, offset, filesz))
+
+    def read(vaddr, size):
+        for start, offset, filesz in segments:
+            if start <= vaddr and vaddr + size <= start + filesz:
+                return elf[offset + vaddr - start:offset + vaddr - start + size]
+        return b""
+
+    entries = []
+    for name, changes in patches.items():
+        differ = [at for at, original, _ in changes if read(at, len(original) // 2) != bytes.fromhex(original)]
+        if differ:
+            print(f"Patches: '{name}' left out: this executable is not version 01.11's at {differ[0]:#x}")
+            continue
+        entries += [(at, bytes.fromhex(replacement)) for at, _, replacement in changes if replacement]
+        print(f"Patches: {name} on")
+    if not entries:
+        return None
+    data = b"G3PATCH2" + struct.pack("<QQ", 0, len(entries))
+    for at, replacement in entries:
+        data += struct.pack("<QQ", at, len(replacement)) + replacement
+    out_path.write_bytes(data)
+    return out_path
+
+
 def game_executable():
     built = ROOT / "gow3_pc/out/gow3-probe.exe"
     if not built.is_file():
@@ -140,15 +202,13 @@ def main():
     env["GOW3_GPU_USER_DIR"] = str(user)
     env.setdefault("GOW3_CONFIG", str(user / "tlou.ini"))
     # A draw whose pipeline is still compiling in the background is skipped: the curtain on the
-    # title screen and the characters' hair flashed white the first time they were drawn. New
-    # pipelines are compiled at once instead (a short stall the first time; the pipeline cache
-    # keeps them), unless the player chose otherwise in the in-game menu (async_shaders).
-    try:
-        chosen = "async_shaders=" in Path(env["GOW3_CONFIG"]).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        chosen = False
-    if not chosen:
-        env.setdefault("GOW3_ASYNC_SHADERS", "0")
+    # title screen and the characters' hair flashed white the first time they were drawn, and the
+    # stale data skipped draws leave crashed the game (two device losses in the Quarantine Zone,
+    # a game assertion; 22 Oct 2026). New pipelines are compiled at once (a short stall the first
+    # time; the pipeline cache and the prefetch below keep it short), whatever the settings file
+    # says, and the in-game menu does not offer the switch.
+    env.setdefault("GOW3_ASYNC_SHADERS", "0")
+    env.setdefault("GOW3_ASYNC_SHADERS_LOCKED", "1")
     # The game compares sceKernelGetDirectMemorySize with a retail console's 4608 MiB; any other
     # size makes it reserve a development kit's 768 MiB debug area.
     env.setdefault("GOW3_DMEM_REPORT_MB", "4608")
@@ -208,6 +268,18 @@ def main():
     if update:
         command += ["--app0-overlay", str(update)]
     command += ["--guest-path", "/app0/eboot.bin"]
+    # TLOU_CHEATS=<name>,...: the cheats above (default: flashlight; "none": no cheats).
+    # TLOU_FIXES=none leaves out the fixes.
+    patches = dict(FIXES) if os.environ.get("TLOU_FIXES") != "none" else {}
+    for name in [c.strip() for c in os.environ.get("TLOU_CHEATS", "flashlight").split(",") if c.strip()]:
+        if name in CHEATS:
+            patches[name] = CHEATS[name]
+        elif name != "none":
+            print(f"Cheats: unknown '{name}' (known: {', '.join(CHEATS)})")
+    if patches:
+        patch_file = image_patches(out / "eboot.elf", out / "patches.bin", patches)
+        if patch_file:
+            command += ["--patches", str(patch_file)]
     if not args.boot:
         command.append("--check-imports")
     if args.cpu_only:

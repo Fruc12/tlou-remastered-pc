@@ -584,12 +584,16 @@ void Liverpool::WaitFramesRetired(u64 count) {
     // guest writes after this submission (memory, a REWIND packet's valid bit). The checkpoint
     // load of Sarah's bedroom froze that way about once in five runs, the game halting with "A
     // frame did not complete in 2.00 seconds". That frame is then as without the wait. A queue
-    // busy decoding (a pipeline compile, say) does not yield and is waited for.
+    // busy decoding (a pipeline compile, say) does not yield and is waited for, up to 0.5 s:
+    // 22 Oct 2026, the queue sat inside a draw (DRAW_INDEX_OFFSET_2) without yielding for over
+    // a second while the guest waited here, and the game halted the same way.
     const auto start = Clock::now();
     auto last_report = start;
     u64 stuck_decoded = gfx_submits_done.load(std::memory_order_acquire);
     u64 last_yields = g_gfx_yields.load(std::memory_order_relaxed);
     auto stuck_since = start;
+    u64 progress_decoded = stuck_decoded;
+    auto progress_since = start;
     while (!retired_cv.wait_for(lk, std::chrono::milliseconds{5},
                                 [&] { return FramesRetired() >= count; })) {
         const auto now = Clock::now();
@@ -598,6 +602,23 @@ void Liverpool::WaitFramesRetired(u64 count) {
         const u64 yields = g_gfx_yields.load(std::memory_order_relaxed);
         const bool waiting = wait || yields != last_yields;
         last_yields = yields;
+        if (decoded != progress_decoded) {
+            progress_decoded = decoded;
+            progress_since = now;
+        } else if (now - progress_since >= std::chrono::milliseconds{500}) {
+            static u64 stalls = 0;
+            if (++stalls <= 20 || stalls % 1000 == 0) {
+                std::printf("Frame wait: released the guest after %.0f ms without a decoded "
+                            "graphics submission (frame %llu wanted, %llu retired; the queue at "
+                            "packet %#x, %s) (%llu so far)\n",
+                            std::chrono::duration<double, std::milli>(now - start).count(),
+                            (unsigned long long)count, (unsigned long long)FramesRetired(),
+                            g_gfx_opcode.load(std::memory_order_relaxed),
+                            waiting ? "waiting" : "not yielding", (unsigned long long)stalls);
+                std::fflush(stdout);
+            }
+            return;
+        }
         if (!waiting || decoded != stuck_decoded) {
             stuck_decoded = decoded;
             stuck_since = now;
@@ -998,11 +1019,56 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     std::memcpy(storage, data, sizeof(storage));
     const auto& release = *reinterpret_cast<const ComputeRelease*>(storage);
     const u32 pipe_id = release.pipe_id;
+    const auto sel = release.packet.data_sel.Value();
+    const auto signal = [packet = release.packet, pipe_id] {
+        packet.SignalFence(
+            [pipe_id] {
+                Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
+            },
+            [](VAddr, u16, u16) {},
+            [](void* address, u64 value, u32 num_bytes) {
+                // Through the backing view, as below (GitHub #51).
+                if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
+                    std::memcpy(address, &value, num_bytes);
+                }
+            });
+    };
+    // gow3 23 Oct 2026: results the guest reads after this fence (Rasterizer::eop_readbacks: the
+    // ray casts, The Last of Us's 106beafd slot 6 and e30509e8 slot 5) are read back here too,
+    // and the fence is written once they are in guest memory, as at end-of-pipe events
+    // (RunEventWriteEop). Read back at the next graphics event instead, the guest had already
+    // read the stale records: NPCs sank into the floor, the characters' hair shook. Later fences
+    // queue behind a deferred one, in order. GOW3_DEFER_RAYCAST_FENCES=0: written at once.
+    static const bool defer = [] {
+        const char* env = std::getenv("GOW3_DEFER_RAYCAST_FENCES");
+        return !(env && env[0] == '0');
+    }();
+    const bool results_pending = rasterizer.ReadBackEopResults(true);
+    auto& cache = rasterizer.GetBufferCache();
+    if (defer && sel != DataSelect::GdsMemStore && (results_pending || cache.HasDeferredSignals())) {
+        rasterizer.WaitHostCopies();
+        rasterizer.WaitDeferredSignals();
+        rasterizer.ProcessDownloadImages();
+        const bool qword = sel != DataSelect::Data32Low;
+        const VAddr label = sel == DataSelect::None ? 0 : release.packet.Address<VAddr>();
+        if (label && cache.MayBeGpuWritten(label & ~VAddr{4095}, 4096)) {
+            rasterizer.NoteLabelWrite(label, qword ? 8 : 4);
+        }
+        if (cache.DeferUntilLastReadback(signal, label,
+                                         qword ? release.packet.DataQWord() : release.packet.DataDWord(),
+                                         qword ? 8 : 4)) {
+            if (results_pending) {
+                rasterizer.Flush(); // the GPU starts on them now (RunEventWriteEop)
+            }
+            return;
+        }
+        signal();
+        return;
+    }
     // gow3 17 Oct 2026: multithreaded rendering: like end-of-pipe fences (RunEventWriteEop), the
     // Vulkan recording thread signals the fence after the copies queued before it instead of
     // this thread waiting for them (~1,800 compute releases a frame, 16% of the
     // draw recording thread blocked on host copies at 4K).
-    const auto sel = release.packet.data_sel.Value();
     if (Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences) &&
         sel != DataSelect::GdsMemStore) {
         rasterizer.ProcessDownloadImages();

@@ -7,7 +7,7 @@
  *   R2 (fire), Space Cross (jump), Left Ctrl Circle (cover, roll), F Square (melee),
  *   R Triangle (reload, pick up), Q / mouse X1 L1, E / mouse X2 R1, Left Shift L3,
  *   V / middle mouse R3, Escape or Enter Options, Tab left touchpad, Backspace right touchpad,
- *   1 2 3 4 d-pad left right up down, mouse wheel d-pad right (up) and left (down).
+ *   1 2 3 4 d-pad left right up down, mouse wheel d-pad right (up) and left (down), G shake.
  * GOW3_KEYBOARD=0 turns the keyboard off. The controls (maps, mouse on, its sensitivity and
  * vertical invert, button icons) come from the settings (gow3gpu.h Gow3Controls: the in-game
  * menu's Controls tab and the launcher's; GOW3_MOUSE=0, GOW3_MOUSE_SENS, GOW3_MOUSE_INVERT=1,
@@ -40,8 +40,9 @@ enum {
     BTN_L2=0x100, BTN_R2=0x200, BTN_L1=0x400, BTN_R1=0x800, BTN_TRIANGLE=0x1000, BTN_CIRCLE=0x2000,
     BTN_CROSS=0x4000, BTN_SQUARE=0x8000, BTN_TOUCHPAD=0x100000,
     /* Host-only sources, never shown to the game: a click on one side of the touchpad from a
-     * button or key without a touch surface (play_click turns them into a touch and a click). */
-    CLICK_LEFT=0x40000000, CLICK_RIGHT=0x80000000,
+     * button or key without a touch surface (play_click turns them into a touch and a click),
+     * and a shake of the controller from a pad without motion sensors (play_shake). */
+    PAD_SHAKE=0x20000000, CLICK_LEFT=0x40000000, CLICK_RIGHT=0x80000000,
 };
 typedef struct { uint16_t x, y; uint8_t id, reserve[3]; } PadTouch;
 typedef struct {
@@ -117,6 +118,28 @@ static void play_click(PadData *d) {
     }
     if (now>=down && now<up) d->buttons|=BTN_TOUCHPAD;
 }
+/* The shake action (G, a gamepad's Share/Capture button, or GOW3_KEY_MAP / GOW3_PAD_MAP
+ * "shake=..."): while held, the motion sensors report a controller shaken by hand, about 8 Hz
+ * at +-2.5 g with the matching rotation. The Last of Us Remastered fixes a flickering flashlight
+ * when the controller is shaken; without a DualShock 4 (an Xbox-style pad, the keyboard) nothing
+ * else could. GOW3_AUTO_SHAKE=<seconds>: also a half-second shake that often on its own, so the
+ * flashlight never stays flickering (0 or unset: off). At rest the sensors read zero, as before. */
+static int auto_shake_due(uint64_t now) {
+    static int period_s=-1;
+    if (period_s<0) { const char *e=getenv("GOW3_AUTO_SHAKE"); period_s=e ? atoi(e) : 0; if (period_s<0) period_s=0; }
+    return period_s>0 && now%((uint64_t)period_s*1000000)<500000;
+}
+static void play_shake(PadData *d) {
+    const int held=(d->buttons & PAD_SHAKE)!=0;
+    d->buttons&=~PAD_SHAKE;
+    if (!held && !auto_shake_due(d->timestamp)) return;
+    const float t=(float)(d->timestamp%1000000)/1e6f;
+    const float wave=sinf(2.0f*3.14159265f*8.0f*t);
+    d->acceleration[0]=2.5f*wave;
+    d->acceleration[2]=1.5f*cosf(2.0f*3.14159265f*8.0f*t);
+    d->angular_velocity[1]=6.0f*wave;
+    d->angular_velocity[2]=4.0f*wave;
+}
 
 static void apply_light_bar(SDL_Gamepad *g);
 /* Opens the first gamepad SDL knows about; called under lock. */
@@ -151,6 +174,7 @@ static const struct { const char *name; uint32_t ps; } ps_names[]={
     {"l1",BTN_L1}, {"r1",BTN_R1}, {"l2",BTN_L2}, {"r2",BTN_R2}, {"l3",BTN_L3}, {"r3",BTN_R3},
     {"options",BTN_OPTIONS}, {"touchpad",CLICK_LEFT}, {"touchpad_left",CLICK_LEFT}, {"touchpad_right",CLICK_RIGHT},
     {"up",BTN_UP}, {"down",BTN_DOWN}, {"left",BTN_LEFT}, {"right",BTN_RIGHT},
+    {"shake",PAD_SHAKE},
 };
 typedef struct { int source; uint32_t ps; } ButtonSource;
 typedef struct { ButtonSource entries[48]; size_t count; } ButtonMap;
@@ -163,7 +187,8 @@ static const ButtonMap default_pad_map={{
     {SDL_GAMEPAD_BUTTON_TOUCHPAD,BTN_TOUCHPAD},
     {SDL_GAMEPAD_BUTTON_DPAD_UP,BTN_UP}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN,BTN_DOWN},
     {SDL_GAMEPAD_BUTTON_DPAD_LEFT,BTN_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT,BTN_RIGHT},
-},15};
+    {SDL_GAMEPAD_BUTTON_MISC1,PAD_SHAKE},
+},16};
 static const ButtonMap default_key_map={{
     {SDL_SCANCODE_SPACE,BTN_CROSS}, {SDL_SCANCODE_LCTRL,BTN_CIRCLE}, {SDL_SCANCODE_F,BTN_SQUARE},
     {SDL_SCANCODE_R,BTN_TRIANGLE}, {SDL_SCANCODE_Q,BTN_L1}, {SDL_SCANCODE_E,BTN_R1},
@@ -171,7 +196,8 @@ static const ButtonMap default_key_map={{
     {SDL_SCANCODE_ESCAPE,BTN_OPTIONS}, {SDL_SCANCODE_RETURN,BTN_OPTIONS},
     {SDL_SCANCODE_TAB,CLICK_LEFT}, {SDL_SCANCODE_BACKSPACE,CLICK_RIGHT},
     {SDL_SCANCODE_1,BTN_LEFT}, {SDL_SCANCODE_2,BTN_RIGHT}, {SDL_SCANCODE_3,BTN_UP}, {SDL_SCANCODE_4,BTN_DOWN},
-},16};
+    {SDL_SCANCODE_G,PAD_SHAKE},
+},17};
 /* Mouse sources (bits of gow3gpu_mouse_take): left, middle, right, X1, X2, wheel up, wheel down. */
 enum { MOUSE_LEFT=1, MOUSE_MIDDLE, MOUSE_RIGHT, MOUSE_X1, MOUSE_X2, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN };
 static const char *const mouse_names[]={"left","middle","right","x1","x2","wheel_up","wheel_down"};
@@ -772,6 +798,7 @@ static void sample(PadData *d) {
         last_mouse=now;
     }
     play_click(d);
+    play_shake(d);
     if (hold_after_capture) {
         if (d->buttons) d->buttons=0;
         else hold_after_capture=0;

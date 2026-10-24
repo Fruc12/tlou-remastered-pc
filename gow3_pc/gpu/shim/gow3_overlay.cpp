@@ -509,8 +509,18 @@ void PerformanceTab() {
         static const char* const queued_labels[] = {"1 (recommended)", "2 (faster; less tested)", "Unlimited"};
         ChoiceRow("Frames queued", s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), "More frames queued: steadier FPS, slower response to input.");
+        // gow3 23 Oct 2026 (GOW3_ASYNC_SHADERS_LOCKED=1, The Last of Us Remastered): kept off.
+        // The draws it skips while their pipeline compiles leave data the game and the GPU read
+        // later stale: two device losses in the Quarantine Zone and a game assertion, all with it on.
+        static const bool async_locked = [] {
+            const char* env = std::getenv("GOW3_ASYNC_SHADERS_LOCKED");
+            return env && env[0] == '1';
+        }();
+        ImGui::BeginDisabled(async_locked);
         CheckRow("Compile new shaders in the background", s.async_shaders,
-                 "Fewer stutters in new areas; an object or effect may appear a moment later.");
+                 async_locked ? "Off in this game: the draws it skips crash it."
+                              : "Fewer stutters in new areas; an object or effect may appear a moment later.");
+        ImGui::EndDisabled();
         ImGui::EndTable();
     }
     ImGui::SeparatorText("Applied on restart");

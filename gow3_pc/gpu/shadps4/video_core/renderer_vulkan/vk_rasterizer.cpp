@@ -816,9 +816,49 @@ bool Copy64EopReadback() {
     return enabled;
 }
 
+/// gow3 23 Oct 2026 (The Last of Us Remastered): NPCs sank into the floor now and then, and the
+/// characters' hair shook. The CPU reads the records two compute shaders write, 48 bytes each,
+/// 4272 or 6480 bytes per dispatch at new ring addresses every frame (106beafd slot 6, e30509e8
+/// slot 5); relaxed readbacks left it the stale bytes there. Precise readbacks fixed both but
+/// broke textures, and reading back every buffer these shaders write froze the game (up to 9 MiB,
+/// and pages the CPU uses). GOW3_EOP_READBACK_SHADERS=<hex>[:<slot>],...: other bindings in place
+/// of these two (without a slot: every written binding of up to 64 KiB).
+static bool TlouEopReadbackBinding(u64 hash, u32 slot) {
+    static const std::vector<std::pair<u64, u32>> bindings = [] {
+        std::vector<std::pair<u64, u32>> list{{0x106beafd, 6}, {0xe30509e8, 5}};
+        if (const char* env = std::getenv("GOW3_EOP_READBACK_SHADERS")) {
+            list.clear();
+            for (const char* p = env; *p;) {
+                char* end = nullptr;
+                const u64 value = std::strtoull(p, &end, 16);
+                if (end == p) {
+                    break;
+                }
+                u32 binding_slot = ~0u;
+                if (*end == ':') {
+                    binding_slot = u32(std::strtoul(end + 1, &end, 10));
+                }
+                list.emplace_back(value, binding_slot);
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    return std::ranges::any_of(bindings, [hash, slot](const auto& b) {
+        return b.first == hash && (b.second == ~0u || b.second == slot);
+    });
+}
+
 bool IsEopReadbackShader(u64 hash) {
     return (hash == 0xc92150ba || (hash == 0x6a6422a9 && Copy64EopReadback())) &&
            EopReadbackMode() != 0;
+}
+
+/// A written binding whose output the guest reads after the next end-of-pipe event (at most 64
+/// KiB for The Last of Us's).
+bool IsEopReadbackBinding(u64 hash, u32 slot, u64 size) {
+    return IsEopReadbackShader(hash) ||
+           (TlouEopReadbackBinding(hash, slot) && size <= 64_KB && EopReadbackMode() != 0);
 }
 
 /// gow3: a T# that passes the format check but cannot be a real texture: the treasure
@@ -3231,13 +3271,16 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
     }
 }
 
-bool Rasterizer::ReadBackEopResults() {
+bool Rasterizer::ReadBackEopResults(bool protected_only) {
+    if (protected_only && eop_readbacks.empty()) {
+        return false;
+    }
     // gow3: tiny GPU-written images (TextureCache::ProcessTinyReadbacks), unprotected: the CPU
     // reads the previous value until they land (a game reading its aim focus distance every
     // frame; a read fault waiting for the GPU each time stalled its threads). Queued first, so the
     // fence waits for the last readback below if there is one.
     bool soft_pending = false;
-    if (!eop_soft_readbacks.empty()) {
+    if (!protected_only && !eop_soft_readbacks.empty()) {
         std::erase_if(eop_soft_readbacks, [this](const auto& r) { return !IsMapped(r.first, r.second); });
         if (!eop_soft_readbacks.empty()) {
             buffer_cache.DownloadRangesAsync(eop_soft_readbacks, false, true);
@@ -3247,7 +3290,7 @@ bool Rasterizer::ReadBackEopResults() {
     }
     // Ray-cast results: unprotected (see eop_open_readbacks); their fence waits for them.
     bool open_pending = false;
-    if (!eop_open_readbacks.empty()) {
+    if (!protected_only && !eop_open_readbacks.empty()) {
         std::erase_if(eop_open_readbacks,
                       [this](const auto& r) { return !IsMapped(r.first, r.second); });
         if (!eop_open_readbacks.empty()) {
@@ -3284,8 +3327,8 @@ bool Rasterizer::ReadBackEopResults() {
     static auto last = std::chrono::steady_clock::now();
     ++readbacks;
     if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds(5)) {
-        std::printf("EOP readbacks (5 s): %u (ray cast results and 6a6422a9 copies, read-protected "
-                    "until copied); fence labels inside one: %u\n",
+        std::printf("EOP readbacks (5 s): %u (GPU results the guest reads after a fence, read-"
+                    "protected until copied); fence labels inside one: %u\n",
                     readbacks, VideoCore::BufferCache::TakeLabelsInReadbacks());
         std::fflush(stdout);
         readbacks = 0;
@@ -5144,7 +5187,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     Gow3WatchRange::Note("storage", stage.pgm_hash, binding.buffer,
                                          vsharp.base_address, size);
                     VideoCore::NoteGpuWriter(vsharp.base_address, size, stage.pgm_hash);
-                    if (IsEopReadbackShader(stage.pgm_hash) &&
+                    if (IsEopReadbackBinding(stage.pgm_hash, binding.buffer, size) &&
                         eop_readbacks.size() + eop_open_readbacks.size() < 256) {
                         // The whole bound buffer counts as GPU-written (up to 9 MiB for
                         // 6a6422a9); read back only what this dispatch writes: dword i for

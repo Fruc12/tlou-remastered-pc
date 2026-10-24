@@ -652,6 +652,7 @@ void BufferCache::ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks)
                 unwatched.fetch_add(1, std::memory_order_relaxed);
             }
         } else {
+            ReleaseOrphanReadWatch(page);
             other.fetch_add(1, std::memory_order_relaxed);
         }
         if (event <= 12 || event % 500 == 0) {
@@ -2714,6 +2715,16 @@ void BufferCache::LandReadbacksWatching(VAddr page) {
                     "readback watches it\n",
                     static_cast<unsigned long long>(page));
         std::fflush(stdout);
+    }
+    ReleaseOrphanReadWatch(page);
+}
+
+// gow3 23 Oct 2026 (GOW3_READBACKS=2, Precise): a read watch no pending readback owns stayed on a
+// page at the main menu; a guest store faulted on it 1.3 million times (a black screen). It is
+// lifted, so the access goes through.
+void BufferCache::ReleaseOrphanReadWatch(VAddr page) {
+    for (int i = 0; i < 64 && page_manager->IsReadWatched(page); ++i) {
+        page_manager->UpdatePageWatchers<false, true>(page, 4096);
     }
 }
 

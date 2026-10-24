@@ -684,6 +684,8 @@ private:
     std::unordered_map<u64, std::chrono::steady_clock::time_point> noisy_pages;
     /// Stops read-protecting one page for every pending readback (a false-sharing read).
     void UnwatchPage(VAddr page);
+    /// Lifts a read watch on `page` that no pending readback owns.
+    void ReleaseOrphanReadWatch(VAddr page);
 
 public:
     /// gow3: lands the pending readbacks that read-protect `page`, waiting for the GPU if needed

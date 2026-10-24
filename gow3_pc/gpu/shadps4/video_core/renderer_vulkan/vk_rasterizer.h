@@ -147,7 +147,9 @@ public:
     /// read-protected: a guest read before the GPU is done waits for that readback only.
     /// (Delaying the event instead broke a game: it is the frame's end-of-pipe tick, which
     /// FrameBegin asserts two frames later.)
-    bool ReadBackEopResults();
+    /// `protected_only` (compute releases): only the read-protected ones (eop_readbacks); the
+    /// others need the graphics fence to wait for them.
+    bool ReadBackEopResults(bool protected_only = false);
     /// gow3: a fence label the runtime writes to guest memory (BufferCache::NoteCpuWrite).
     void NoteLabelWrite(VAddr address, u64 size) {
         buffer_cache.NoteCpuWrite(address, size);

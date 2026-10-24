@@ -110,8 +110,11 @@ static auto UserPaths = [] {
 
     std::unordered_map<PathType, fs::path> paths;
 
+    // gow3 23 Oct 2026: never throws. The cache folder, a junction whose target did not exist
+    // ("cannot create a file that already exists"), closed the game before its first line.
     const auto create_path = [&](PathType shad_path, const fs::path& new_path) {
-        std::filesystem::create_directory(new_path);
+        std::error_code error;
+        std::filesystem::create_directory(new_path, error);
         paths.insert_or_assign(shad_path, new_path);
     };
 
@@ -129,7 +132,14 @@ static auto UserPaths = [] {
     create_path(PathType::MetaDataDir, user_dir / METADATA_DIR);
     create_path(PathType::CustomTrophy, user_dir / CUSTOM_TROPHY);
     create_path(PathType::CustomConfigs, user_dir / CUSTOM_CONFIGS);
-    create_path(PathType::CacheDir, user_dir / CACHE_DIR);
+    // gow3: GOW3_GPU_CACHE_DIR places the shader and pipeline caches elsewhere (an SSD).
+    if (const char* cache_dir = std::getenv("GOW3_GPU_CACHE_DIR"); cache_dir && cache_dir[0]) {
+        std::error_code error;
+        std::filesystem::create_directories(cache_dir, error);
+        paths.insert_or_assign(PathType::CacheDir, fs::path(cache_dir));
+    } else {
+        create_path(PathType::CacheDir, user_dir / CACHE_DIR);
+    }
     create_path(PathType::FontsDir, user_dir / FONTS_DIR);
     create_path(PathType::TrophyDir, user_dir / TROPHY_DIR);
     create_path(PathType::HomeDir, user_dir / HOME_DIR);

@@ -200,6 +200,11 @@ def main():
     msys = Path(os.environ.get("MSYS2_ROOT", "C:/msys64"))
     env["PATH"] = str(msys / "clang64/bin") + os.pathsep + env.get("PATH", "")
     env["GOW3_GPU_USER_DIR"] = str(user)
+    # The shader cache: analysis/tlou-user/cache or, when that is a link (a junction to an SSD,
+    # README), the folder it points to.
+    cache = user / "cache"
+    if cache.exists():
+        env.setdefault("GOW3_GPU_CACHE_DIR", str(cache.resolve()))
     env.setdefault("GOW3_CONFIG", str(user / "tlou.ini"))
     # A draw whose pipeline is still compiling in the background is skipped: the curtain on the
     # title screen and the characters' hair flashed white the first time they were drawn, and the

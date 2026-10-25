@@ -941,16 +941,20 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         // gow3 25 Oct 2026: a fence deferred to a readback queued just now (results_pending)
         // waits for none of them here: that readback lands once this submission is done on the
         // GPU, and its submission waited for every copy issued before it, after the recording
-        // thread had written the signals deferred to it. Waiting here was ~27% of the draw
-        // recording thread with the DMA counters read back at every such event.
-        const bool to_new_readback = wait_readbacks && results_pending;
+        // thread had written the signals deferred to it. (Timed per task, GOW3_PROFILE's
+        // "Ordering waits": these events ~70 ms per 5 s of the draw recording thread, the chained
+        // compute releases ~690 ms.)
+        // A fence chained behind an earlier deferred one (no readback of its own) checks them
+        // when it is written instead (Scheduler::WaitGuestOrder, as in RunComputeReleaseMem).
         const auto order_writes = [&rasterizer] {
             rasterizer.WaitHostCopies();
             rasterizer.WaitDeferredSignals();
         };
-        if (!to_new_readback) {
+        if (!wait_readbacks) {
             order_writes();
         }
+        auto& scheduler = rasterizer.GetRuntime().GetScheduler();
+        const auto order = scheduler.GuestOrderNow();
         const VAddr label =
             eop.data_sel.Value() == DataSelect::None ? 0 : reinterpret_cast<VAddr>(eop.Address<u32>());
         u64 value = 0;
@@ -995,7 +999,14 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         // complete in order (the guest frees command buffers of frame N once it sees frame N+1
         // done; a later fence written first let the game overwrite a command buffer the GPU
         // thread was still reading).
-        if (wait_readbacks && cache.DeferUntilLastReadback(signal, label, value, bytes)) {
+        std::function<void()> deferred_signal = signal;
+        if (wait_readbacks && !results_pending) {
+            deferred_signal = [signal, order, &scheduler] {
+                scheduler.WaitGuestOrder(order);
+                signal();
+            };
+        }
+        if (wait_readbacks && cache.DeferUntilLastReadback(deferred_signal, label, value, bytes)) {
             // The GPU starts on the ray casts now rather than when the frame's command buffer is
             // submitted at its end: the fence (and the guest waiting for it) follows sooner.
             // gow3 21 Oct 2026 (GPU worker): GOW3_RAYCAST_FLUSH=lazy leaves them in the command
@@ -1012,8 +1023,8 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
             }
             return;
         }
-        if (to_new_readback) {
-            order_writes();
+        if (wait_readbacks) {
+            order_writes(); // not deferred after all: written now, in order
         }
         signal();
     }
@@ -1062,10 +1073,17 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     auto& cache = rasterizer.GetBufferCache();
     if (defer && sel != DataSelect::GdsMemStore && (results_pending || cache.HasDeferredSignals())) {
         // gow3 25 Oct 2026: as in RunEventWriteEop, a fence deferred to a readback queued just
-        // now needs no wait here for the copies and signals issued before it.
+        // now needs no wait here for the copies and signals issued before it. One chained behind
+        // an earlier deferred fence checks them when it is written (Scheduler::WaitGuestOrder),
+        // about a frame later: waiting here for the recorder's copies was ~25,000 waits a second,
+        // ~14% of the draw recording thread, once deferred fences were nearly always pending.
+        auto& scheduler = rasterizer.GetRuntime().GetScheduler();
+        std::function<void()> deferred_signal = signal;
         if (!results_pending) {
-            rasterizer.WaitHostCopies();
-            rasterizer.WaitDeferredSignals();
+            deferred_signal = [signal, order = scheduler.GuestOrderNow(), &scheduler] {
+                scheduler.WaitGuestOrder(order);
+                signal();
+            };
         }
         rasterizer.ProcessDownloadImages();
         const bool qword = sel != DataSelect::Data32Low;
@@ -1073,7 +1091,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         if (label && cache.MayBeGpuWritten(label & ~VAddr{4095}, 4096)) {
             rasterizer.NoteLabelWrite(label, qword ? 8 : 4);
         }
-        if (cache.DeferUntilLastReadback(signal, label,
+        if (cache.DeferUntilLastReadback(deferred_signal, label,
                                          qword ? release.packet.DataQWord() : release.packet.DataDWord(),
                                          qword ? 8 : 4)) {
             if (results_pending) {
@@ -1081,10 +1099,9 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
             }
             return;
         }
-        if (results_pending) {
-            rasterizer.WaitHostCopies();
-            rasterizer.WaitDeferredSignals();
-        }
+        // Not deferred after all: written now, in order.
+        rasterizer.WaitHostCopies();
+        rasterizer.WaitDeferredSignals();
         signal();
         return;
     }

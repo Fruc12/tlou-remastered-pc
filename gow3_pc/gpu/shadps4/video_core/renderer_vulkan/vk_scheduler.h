@@ -36,6 +36,11 @@ class VkCtxScope;
 
 namespace Vulkan {
 
+/// gow3 25 Oct 2026 diagnostics (GOW3_PROFILE): the draw recording thread's current task (a
+/// RunInOrder function; null for draws and dispatches), for the guest-write ordering wait
+/// statistics (Scheduler::WaitDeferredSignals, WaitHostCopies).
+inline thread_local const void* g_wait_owner = nullptr;
+
 class Instance;
 
 struct RenderAttachment {
@@ -861,6 +866,19 @@ public:
     /// the write cannot overtake an earlier fence. Otherwise the guest, seeing the later value,
     /// may free memory the earlier fence then writes into (corrupted heap, guest fault).
     void WaitDeferredSignals();
+    /// gow3 25 Oct 2026: what WaitHostCopies and WaitDeferredSignals would wait for now.
+    struct GuestOrder {
+        u64 host_copies;
+        u64 deferred_signals;
+    };
+    [[nodiscard]] GuestOrder GuestOrderNow() const {
+        return {host_copies_issued, deferred_signals_issued.load(std::memory_order_relaxed)};
+    }
+    /// Waits for the copies and deferred signals of `order`, on the recording thread or with it
+    /// idle: a fence chained behind a deferred one is written when that one's readback lands,
+    /// about a frame later, and checks its order then (nearly always met) instead of waiting
+    /// when it is recorded.
+    void WaitGuestOrder(const GuestOrder& order);
 
     /// gow3 statistics: sizes of the scheduler's queues (growth over time).
     std::string DebugSizes() {

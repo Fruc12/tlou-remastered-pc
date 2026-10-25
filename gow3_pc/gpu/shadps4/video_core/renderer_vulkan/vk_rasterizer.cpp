@@ -1820,7 +1820,9 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     auto& self = *static_cast<Rasterizer*>(context);
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
+        g_wait_owner = reinterpret_cast<const void*>(task.task);
         task.task(self, data + sizeof(TaskPacket));
+        g_wait_owner = nullptr;
         return;
     }
     const auto& packet = *reinterpret_cast<const DrawPacket*>(data);

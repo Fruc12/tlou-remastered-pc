@@ -209,6 +209,50 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
     KickRecording(true);
 }
 
+// gow3 25 Oct 2026 diagnostics (GOW3_PROFILE): time spent in the guest-write ordering waits by
+// the task that waited (g_wait_owner: offset from the image base, symbolized against the build),
+// every 5 s.
+extern "C" char __ImageBase;
+static bool OrderWaitStatsEnabled() {
+    static const bool on = std::getenv("GOW3_PROFILE") != nullptr;
+    return on;
+}
+static void NoteOrderWait(int kind, std::chrono::steady_clock::time_point start) {
+    static std::mutex mutex;
+    static std::map<std::pair<const void*, int>, std::pair<u64, u64>> waits;
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock{mutex};
+    auto& entry = waits[{g_wait_owner, kind}];
+    ++entry.first;
+    entry.second += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
+    if (now - last < std::chrono::seconds{5}) {
+        return;
+    }
+    last = now;
+    std::vector<std::pair<u64, std::pair<const void*, int>>> sorted;
+    for (const auto& [key, value] : waits) {
+        sorted.emplace_back(value.second, key);
+    }
+    std::ranges::sort(sorted, std::greater{});
+    static const char* const kinds[] = {"deferred signals", "recorder copies", "copy threads",
+                                        "chained fence at landing"};
+    std::string text;
+    for (size_t i = 0; i < std::min<size_t>(sorted.size(), 8); ++i) {
+        const auto& [ns, key] = sorted[i];
+        const auto offset = key.first ? static_cast<unsigned long long>(
+                                            reinterpret_cast<uintptr_t>(key.first) -
+                                            reinterpret_cast<uintptr_t>(&__ImageBase))
+                                      : 0ull;
+        text += fmt::format(" {} by {}: {}x {:.1f} ms;", kinds[key.second],
+                            key.first ? fmt::format("task +{:#x}", offset) : std::string{"draws"},
+                            waits[key].first, ns / 1e6);
+    }
+    std::printf("Ordering waits (5 s):%s\n", text.c_str());
+    std::fflush(stdout);
+    waits.clear();
+}
+
 void Scheduler::WaitDeferredSignals() {
     guest_write_epoch.fetch_add(1, std::memory_order_relaxed);
     const u64 issued = deferred_signals_issued.load(std::memory_order_relaxed);
@@ -217,11 +261,34 @@ void Scheduler::WaitDeferredSignals() {
         return;
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
+    const auto start = std::chrono::steady_clock::now();
     KickRecording(true);
     while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
         // Helps the copy threads the signals wait for.
         Gow3Copy::WaitAsync();
         std::this_thread::yield();
+    }
+    if (OrderWaitStatsEnabled()) {
+        NoteOrderWait(0, start);
+    }
+}
+
+void Scheduler::WaitGuestOrder(const GuestOrder& order) {
+    const auto met = [&] {
+        return host_copies_done.load(std::memory_order_acquire) >= order.host_copies &&
+               deferred_signals_done->load(std::memory_order_acquire) >= order.deferred_signals;
+    };
+    if (met()) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    while (!met()) {
+        KickRecording(true);
+        Gow3Copy::WaitAsync();
+        std::this_thread::yield();
+    }
+    if (OrderWaitStatsEnabled()) {
+        NoteOrderWait(3, start);
     }
 }
 
@@ -230,9 +297,13 @@ void Scheduler::WaitHostCopies() {
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
         Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
         Gow3Stats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
+        const auto start = std::chrono::steady_clock::now();
         KickRecording(true);
         while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
             std::this_thread::yield();
+        }
+        if (OrderWaitStatsEnabled()) {
+            NoteOrderWait(1, start);
         }
     }
     // gow3 20 Oct 2026 (idle CPU): nothing on the copy threads and nothing batched by this
@@ -246,7 +317,11 @@ void Scheduler::WaitHostCopies() {
         return;
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::copy_threads_wait_ns};
+    const auto start = std::chrono::steady_clock::now();
     Gow3Copy::WaitAsync();
+    if (OrderWaitStatsEnabled()) {
+        NoteOrderWait(2, start);
+    }
 }
 
 void Scheduler::KickRecording(bool force) {

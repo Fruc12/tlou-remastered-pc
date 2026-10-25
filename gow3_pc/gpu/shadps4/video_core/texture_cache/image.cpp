@@ -483,9 +483,11 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
 }
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
-             Common::SlotVector<ImageView>& slot_image_views_, const ImageInfo& info_)
+             Common::SlotVector<ImageView>& slot_image_views_, const ImageInfo& info_,
+             u32 layer_capacity)
     : guest_begin{info_.guest_address}, guest_end{info_.guest_address + info_.guest_size},
-      info{info_}, runtime{&runtime_}, slot_image_views{&slot_image_views_} {
+      vk_layers{std::max<u32>(info_.resources.layers, layer_capacity)}, info{info_},
+      runtime{&runtime_}, slot_image_views{&slot_image_views_} {
     Gow3Stats::Timer timer{Gow3Stats::t_image_create};
     if (info.pixel_format == vk::Format::eUndefined) {
         return;
@@ -558,7 +560,7 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
             .depth = info.size.depth,
         },
         .mipLevels = static_cast<u32>(info.resources.levels),
-        .arrayLayers = static_cast<u32>(info.resources.layers),
+        .arrayLayers = vk_layers,
         .samples = LiverpoolToVK::NumSamples(info.num_samples, supported_samples),
         .tiling = tiling,
         .usage = usage_flags,
@@ -613,13 +615,13 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
 
     if (needs_partial_transition || partially_transited) {
         if (!partially_transited) {
-            subresource_states.resize(info.resources.levels * info.resources.layers);
+            subresource_states.resize(info.resources.levels * vk_layers);
             std::fill(subresource_states.begin(), subresource_states.end(), last_state);
         }
 
         // In case of partial transition, we need to change the specified subresources only.
         // Otherwise all subresources need to be set to the same state so we can use a full
-        // resource transition for the next time.
+        // resource transition for the next time (gow3: spare layers included, see vk_layers).
         const auto mips =
             needs_partial_transition
                 ? std::ranges::views::iota(subres_range->base.level,
@@ -629,13 +631,13 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
             needs_partial_transition
                 ? std::ranges::views::iota(subres_range->base.layer,
                                            subres_range->base.layer + subres_range->extent.layers)
-                : std::views::iota(0u, info.resources.layers);
+                : std::views::iota(0u, vk_layers);
 
         for (u32 mip : mips) {
             for (u32 layer : layers) {
                 // NOTE: these loops may produce a lot of small barriers.
                 // If this becomes a problem, we can optimize it by merging adjacent barriers.
-                const auto subres_idx = mip * info.resources.layers + layer;
+                const auto subres_idx = mip * vk_layers + layer;
                 ASSERT(subres_idx < subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 
@@ -704,6 +706,13 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
     last_state.layout = dst_layout;
     last_state.access_mask = dst_mask;
     last_state.pl_stage = dst_stage;
+}
+
+void Image::GrowLayers(const ImageInfo& grown) {
+    ASSERT(grown.resources.levels == info.resources.levels &&
+           grown.resources.layers >= info.resources.layers && grown.resources.layers <= vk_layers);
+    info = grown;
+    guest_end = guest_begin + info.guest_size;
 }
 
 } // namespace VideoCore

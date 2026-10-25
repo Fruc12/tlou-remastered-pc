@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <map>
 #include <format>
 #include <string>
 
@@ -270,6 +271,26 @@ public:
     /// Creates a new image with provided image info and copies subresources from image_id
     [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, ImageId image_id);
 
+    /// gow3 25 Oct 2026: a depth target's layers come from its view (slice_max + 1), so an array
+    /// the game renders slice by slice (The Last of Us's 1024x1024 shadow arrays, 12-18 layers,
+    /// at a new address each time) grew one layer at a time: a new image and a full copy each
+    /// (ResolveDepthOverlap), ~624 MiB of images for one 12-layer array, under the memory
+    /// pressure that evicted it again (~26 times a session; 18-33 ms per creation, frames of
+    /// 100-300 ms entering areas). A depth array that grows is created with spare layers (the
+    /// most this array shape was seen with, or the next step of 4, 8, 16, 24...) and later
+    /// growth within them only takes the new description. GOW3_DEPTH_LAYER_CAPACITY=0: off.
+    [[nodiscard]] bool GrowDepthLayers(ImageId image_id, const ImageInfo& grown);
+    [[nodiscard]] u32 DepthLayerCapacity(const ImageInfo& grown);
+    struct DepthArrayShape {
+        u32 format;
+        u32 width;
+        u32 height;
+        u32 pitch;
+        u32 tile_mode;
+        auto operator<=>(const DepthArrayShape&) const = default;
+    };
+    std::map<DepthArrayShape, u32> depth_array_layers; ///< the most layers seen per shape
+
     /// Reuploads image contents.
     void RefreshImage(Image& image);
 
@@ -525,6 +546,7 @@ private:
     u64 total_used_memory = 0;
     u64 gc_evictions = 0, gc_downloads = 0; ///< gow3: pressure report
     std::chrono::steady_clock::time_point gc_report_time{};
+    std::chrono::steady_clock::time_point depth_array_report_time{}; ///< gow3: GrowDepthLayers
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;

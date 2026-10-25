@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include <set>
 #include <tuple>
 #include <xxhash.h>
@@ -712,7 +713,16 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
-        const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
+        if (GrowDepthLayers(cache_image_id, new_info)) {
+            return cache_image_id;
+        }
+        const u32 layer_capacity =
+            cache_image.info.resources.layers < new_info.resources.layers &&
+                    cache_image.info.props.is_depth && new_info.props.is_depth
+                ? DepthLayerCapacity(new_info)
+                : 0;
+        const auto new_image_id =
+            slot_images.insert(instance, runtime, slot_image_views, new_info, layer_capacity);
         RegisterImage(new_image_id);
         // gow3 18 Oct 2026: the insert moves every image when the slot vector grows (Reserve), so
         // `cache_image` may point into freed memory now: both are fetched again.
@@ -991,6 +1001,82 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
     }
 
     return {merged_image_id, -1, -1};
+}
+
+static std::atomic<u32> g_depth_layers_grown{0}; // gow3 25 Oct 2026: GrowDepthLayers
+static std::atomic<u32> g_depth_arrays_spare{0}; // created with spare layers
+static bool DepthLayerCapacityEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_DEPTH_LAYER_CAPACITY");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+bool TextureCache::GrowDepthLayers(ImageId image_id, const ImageInfo& grown) {
+    Image& image = slot_images[image_id];
+    const ImageInfo& info = image.info;
+    if (!DepthLayerCapacityEnabled() || !info.props.is_depth || !grown.props.is_depth ||
+        grown.resources.layers <= info.resources.layers ||
+        grown.resources.layers > image.vk_layers ||
+        grown.resources.levels != info.resources.levels ||
+        grown.guest_address != info.guest_address || grown.pixel_format != info.pixel_format ||
+        grown.type != info.type || grown.size != info.size || grown.pitch != info.pitch ||
+        grown.tile_mode != info.tile_mode || grown.num_samples != info.num_samples ||
+        // DeleteImage drops the surface metas registered at the image's addresses.
+        grown.meta_info.htile_addr != info.meta_info.htile_addr ||
+        grown.meta_info.cmask_addr != info.meta_info.cmask_addr ||
+        grown.meta_info.fmask_addr != info.meta_info.fmask_addr ||
+        image.backing_images.size() != 1 || True(image.flags & ImageFlagBits::Aliased) ||
+        False(image.flags & ImageFlagBits::Registered)) {
+        return false;
+    }
+    // The registration follows the new size: memory, pages, and lookup results (generation).
+    const u64 old_memory = Common::AlignUp(image.MemoryBytes(), 1024);
+    image.GrowLayers(grown);
+    // Like a depth image created through overlap resolution: not cleared on first use.
+    image.info.meta_info.htile_clear_mask = 0;
+    const u64 new_memory = Common::AlignUp(image.MemoryBytes(), 1024);
+    total_used_memory += new_memory - old_memory;
+    Gow3Stats::image_bytes += new_memory - old_memory;
+    ++registry_generation;
+    ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
+        auto& ids = page_table[page];
+        if (std::ranges::find(ids, image_id) == ids.end()) {
+            ids.push_back(image_id);
+        }
+    });
+    TrackImage(image_id);
+    if (image.binding.is_bound || image.binding.is_target) {
+        image.binding.needs_rebind = 1u;
+    }
+    auto& seen = depth_array_layers[{static_cast<u32>(grown.pixel_format), grown.size.width,
+                                     grown.size.height, grown.pitch,
+                                     static_cast<u32>(grown.tile_mode)}];
+    seen = std::max(seen, grown.resources.layers);
+    g_depth_layers_grown.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+u32 TextureCache::DepthLayerCapacity(const ImageInfo& grown) {
+    const u32 layers = grown.resources.layers;
+    if (!DepthLayerCapacityEnabled() || grown.resources.levels != 1 || layers < 2 ||
+        grown.type == AmdGpu::ImageType::Color3D) {
+        return 0;
+    }
+    auto& seen = depth_array_layers[{static_cast<u32>(grown.pixel_format), grown.size.width,
+                                     grown.size.height, grown.pitch,
+                                     static_cast<u32>(grown.tile_mode)}];
+    seen = std::max(seen, layers);
+    // Arrays of a shape seen before get the most layers it had; new ones grow in steps.
+    const u32 step =
+        layers <= 8 ? std::max(4u, std::bit_ceil(layers)) : Common::AlignUp(layers, 8u);
+    const u32 capacity = std::min(std::max(seen, step), 64u);
+    if (capacity <= layers) {
+        return 0;
+    }
+    g_depth_arrays_spare.fetch_add(1, std::memory_order_relaxed);
+    return capacity;
 }
 
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
@@ -1497,8 +1583,8 @@ void TextureCache::RegisterImage(ImageId image_id) {
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
     ++registry_generation;
-    total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
-    Gow3Stats::image_bytes += Common::AlignUp(image.info.guest_size, 1024);
+    total_used_memory += Common::AlignUp(image.MemoryBytes(), 1024);
+    Gow3Stats::image_bytes += Common::AlignUp(image.MemoryBytes(), 1024);
     ++Gow3Stats::images_live;
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     image.lru_touched_tick = gc_tick;
@@ -1535,8 +1621,8 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     image.flags &= ~ImageFlagBits::Registered;
     ++registry_generation;
     lru_cache.Free(image.lru_id);
-    total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
-    Gow3Stats::image_bytes -= Common::AlignUp(image.info.guest_size, 1024);
+    total_used_memory -= Common::AlignUp(image.MemoryBytes(), 1024);
+    Gow3Stats::image_bytes -= Common::AlignUp(image.MemoryBytes(), 1024);
     --Gow3Stats::images_live;
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
         const auto page_it = page_table.find(page);
@@ -1799,6 +1885,18 @@ void TextureCache::GarbageCollectImages() {
                         (unsigned long long)gc_evictions, (unsigned long long)gc_downloads);
             gc_report_time = now;
             gc_evictions = gc_downloads = 0;
+        }
+    }
+    // gow3 25 Oct 2026: depth arrays (GrowDepthLayers), at most every 5 s.
+    if (g_depth_layers_grown.load(std::memory_order_relaxed) != 0 ||
+        g_depth_arrays_spare.load(std::memory_order_relaxed) != 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - depth_array_report_time >= std::chrono::seconds(5)) {
+            std::printf("Texture cache: depth arrays created with spare layers %u, grown into "
+                        "them %u (since the last report)\n",
+                        g_depth_arrays_spare.exchange(0, std::memory_order_relaxed),
+                        g_depth_layers_grown.exchange(0, std::memory_order_relaxed));
+            depth_array_report_time = now;
         }
     }
 }

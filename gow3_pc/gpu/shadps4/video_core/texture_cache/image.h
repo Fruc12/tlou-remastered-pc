@@ -84,8 +84,11 @@ public:
 };
 
 struct Image {
+    /// gow3: `layer_capacity` above the guest's layers creates the host image with spare layers
+    /// to grow into (GrowLayers).
     explicit Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime,
-                   Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info);
+                   Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info,
+                   u32 layer_capacity = 0);
     ~Image();
 
     Image(const Image&) = delete;
@@ -134,6 +137,17 @@ struct Image {
                      vk::PipelineStageFlags2 dst_stage,
                      std::optional<SubresourceRange> subres_range = {});
 
+    /// gow3: takes `grown` (this image with more layers, within vk_layers) as its description.
+    void GrowLayers(const ImageInfo& grown);
+
+    /// gow3: host memory the image holds, spare layers included.
+    u64 MemoryBytes() const {
+        if (vk_layers <= info.resources.layers || info.resources.layers == 0) {
+            return info.guest_size;
+        }
+        return info.guest_size / info.resources.layers * vk_layers;
+    }
+
 public:
     struct BackingImage;
     // gow3: fields every binding of the image reads, together ahead of the large ImageInfo
@@ -157,6 +171,9 @@ public:
     VAddr track_addr_end = 0;
     VAddr guest_begin = 0; ///< info.guest_address
     VAddr guest_end = 0;   ///< info.guest_address + info.guest_size
+    /// gow3: the host image's array layers; more than the guest's while spare ones are left.
+    /// Layout tracking covers all of them, so a layer grown into is in the tracked state.
+    u32 vk_layers = 1;
     BackingImage* backing{};
     /// gow3: gc tick of the last LRU touch; skips the LRU list (a cache miss) when current.
     mutable u64 lru_touched_tick = ~0ULL;

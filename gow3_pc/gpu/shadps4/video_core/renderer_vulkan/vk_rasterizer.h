@@ -186,6 +186,9 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
+    /// gow3: OnSubmit and Flush at the end of a guest submission, in order on the draw
+    /// recording thread when the draw pipeline runs.
+    void EndSubmission();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
@@ -403,6 +406,8 @@ private:
         bool is_written;
     };
     boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
+    /// gow3 diagnostics: GOW3_TRACE_DISPATCH (DumpTracedDispatches on a device loss).
+    void NoteTracedDispatch(u64 hash, u32 x, u32 y, u32 z);
     /// gow3: arenas the current draw's DMA reads (SyncDmaMemory windows), for barriers.
     boost::container::small_vector<const VideoCore::Buffer*, 4> dma_read_arenas;
 

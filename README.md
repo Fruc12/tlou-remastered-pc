@@ -14,9 +14,14 @@ Work in progress. The game boots through the logos, the menus and the opening ci
 prologue in Sarah's house, which renders correctly (lighting, skinned characters, bloom).
 
 - **Frame rate:** about 47 FPS in Sarah's bedroom and 48-53 FPS walking upstairs on a laptop with
-  a GTX 1050 Ti Mobile (4 GB), where the GPU is the limit.
-- **Known issues:** the HUD of the item inspection screen does not show; Sarah's hair sometimes
-  stretches (not reproduced yet). A frame that compiles many new shaders can pause the game for
+  a GTX 1050 Ti Mobile (4 GB), where the GPU is the limit; 30-34 FPS in the Quarantine Zone's
+  heavy streets, where the game's own threads are. Frames are shown as soon as they are done (a
+  480 Hz vblank, capped at the display's rate; `GOW3_VBLANK_HZ=60` for the old 60 Hz pacing).
+  `Start-TLOU-Profile.cmd` starts the game with the sampling profiler (reports in
+  `analysis\tlou\profile-user`, read with `tools/profile_rank.py`).
+- **Known issues:** the HUD of the item inspection screen does not show; with the 60 Hz vblank
+  the characters' hair (Sarah's, Joel's) sometimes stretched (not seen with the default 480 Hz
+  one). A frame that compiles many new shaders can pause the game for
   a few seconds: the game's own frame watchdog stopped it after 2 s, and is now patched to 20 s
   (`TLOU_FIXES=none` leaves the game unpatched). If a load ever hangs, start with
   `GOW3_FRAMES_IN_FLIGHT=0` (slower).
@@ -40,7 +45,9 @@ prologue in Sarah's house, which renders correctly (lighting, skinned characters
    only have as a PKG unpacks there with `python tools/install_update.py <update.pkg> <game folder>`.
 2. Build the runtime (below), then start the game with `Start-TLOU.cmd`, or
    `python tools/probe_tlou.py --boot --seconds 0 [--game <game folder>]`.
-3. Saves and settings stay in `analysis/tlou-user`; the log is `analysis/tlou/boot.log`.
+3. Saves and settings stay in `analysis/tlou-user`; the log is `analysis/tlou/boot.log`. Each
+   session also records your controller input (`analysis/tlou/pad-record-*.txt`, the newest 5),
+   so a crash can be replayed on the same route; `TLOU_RECORD_PAD=0` turns that off.
 4. With this repository on a hard disk, put the shader cache (`analysis/tlou-user/cache`, about
    700 MB) on an SSD: each new area loads hundreds of its files, and on a hard disk that pauses
    the game for seconds. With the game closed, move the folder, then link it back:

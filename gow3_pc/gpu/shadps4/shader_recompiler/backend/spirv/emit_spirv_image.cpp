@@ -281,9 +281,26 @@ void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id 
     } else if (Sirit::ValidId(lod)) {
         LOG_WARNING(Render, "Fallback for ImageWrite with LOD");
         ASSERT(texture.mip_fallback_mode == MipStorageFallbackMode::DynamicIndex);
+        // gow3 24 Oct 2026: a level past the array (one view per level of the T#) is dropped, as
+        // the PS4's GPU drops stores past an image's last level. Indexed past it, the store went
+        // through whatever descriptor followed: The Last of Us's 128x128 RG32F pyramid (cs
+        // 4a705408) wrote to GPU address 0 at its main menu (VK_EXT_device_fault on NVIDIA).
+        const Id in_range =
+            ctx.OpULessThan(ctx.U1[1], lod, ctx.ConstU32(texture.num_bindings));
+        const Id write_label = ctx.OpLabel();
+        const Id merge_label = ctx.OpLabel();
+        ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+        ctx.OpBranchConditional(in_range, write_label, merge_label);
+        ctx.AddLabel(write_label);
         const Id single_image_ptr_type =
             ctx.TypePointer(spv::StorageClass::UniformConstant, texture.image_type);
         image_ptr = ctx.OpAccessChain(single_image_ptr_type, image_ptr, std::array{lod});
+        const Id image = ctx.OpLoad(texture.image_type, image_ptr);
+        const Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;
+        ctx.OpImageWrite(image, coords, texel, operands.mask, operands.operands);
+        ctx.OpBranch(merge_label);
+        ctx.AddLabel(merge_label);
+        return;
     }
     const Id image = ctx.OpLoad(texture.image_type, image_ptr);
     const Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;

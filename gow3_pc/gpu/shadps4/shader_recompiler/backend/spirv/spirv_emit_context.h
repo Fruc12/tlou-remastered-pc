@@ -320,6 +320,7 @@ public:
         bool is_integer = false;
         bool is_storage = false;
         MipStorageFallbackMode mip_fallback_mode{};
+        u32 num_bindings = 1; ///< array length with MipStorageFallbackMode::DynamicIndex
     };
 
     enum class PointerType : u32 {

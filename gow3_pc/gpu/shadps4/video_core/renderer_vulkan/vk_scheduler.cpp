@@ -430,7 +430,9 @@ void Scheduler::Checkpoint(const char* operation,u64 first,u64 second) {
 /// Set by the buffer cache: prints which arena and guest address a GPU address belongs to.
 std::function<void(u64)> g_describe_gpu_address;
 void DescribeBoundAddress(u64 address);
+void DumpTracedDispatches(); // vk_rasterizer.cpp, GOW3_TRACE_DISPATCH
 void DumpDeviceFault(const Instance& instance) {
+    DumpTracedDispatches();
     if (!instance.HasDeviceFault()) return;
     const auto device=instance.GetDevice();
     vk::DeviceFaultCountsEXT counts{};

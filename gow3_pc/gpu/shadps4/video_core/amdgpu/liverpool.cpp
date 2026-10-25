@@ -501,8 +501,7 @@ void Liverpool::ProcessLoop(std::stop_token stoken) {
                 if (static long submits = 0; test_throw > 0 && ++submits == test_throw) {
                     throw std::runtime_error("test exception (GOW3_TEST_GPU_THROW)");
                 }
-                rasterizer->OnSubmit();
-                rasterizer->Flush();
+                rasterizer->EndSubmission();
             }
             submit_done = false;
         }
@@ -1325,6 +1324,34 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
         std::printf("GPU waits on deferred fences (5 s): %u, %.2f ms waiting in all\n", n,
                     waited_us.exchange(0) / 1e3);
         std::fflush(stdout);
+    }
+    return false;
+}
+
+// gow3 24 Oct 2026: a compute RELEASE_MEM handed to the draw recording thread, noted like
+// end-of-pipe fences (NotePendingFences): a compute wait on its label counts it as written.
+void Liverpool::NotePendingRelease(const PM4CmdReleaseMem& release) {
+    const u64 position = rasterizer->DrawPipeHead();
+    while (!pending_fences.empty() && rasterizer->DrawPipeReached(pending_fences.front().position)) {
+        pending_fences.pop_front();
+    }
+    release.SignalFence([] {}, [](VAddr, u16, u16) {},
+                        [&](void* address, u64 data, u32 num_bytes) {
+                            pending_fences.push_back(
+                                {reinterpret_cast<VAddr>(address), data, num_bytes, position});
+                            rasterizer->NotePendingGpuWrite(reinterpret_cast<VAddr>(address),
+                                                            num_bytes);
+                        });
+}
+
+bool Liverpool::HasPendingWrite(VAddr address) {
+    for (auto it = pending_fences.rbegin(); it != pending_fences.rend(); ++it) {
+        if (rasterizer->DrawPipeReached(it->position)) {
+            break;
+        }
+        if (address >= it->address && address + sizeof(u32) <= it->address + it->num_bytes) {
+            return true;
+        }
     }
     return false;
 }
@@ -2544,6 +2571,49 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     FIBER_EXIT;
 }
 
+// gow3 24 Oct 2026 diagnostics (GOW3_COMPUTE_WAIT_STATS=1): compute memory waits that drained the
+// draw pipeline, every 5 s: how many the drain satisfied (the value came from work the draw
+// recording thread still held) and how many it did not, with their busiest labels. ~1,000 such
+// drains a second were 16-18% of the GPU command thread in a heavy area of The Last of Us.
+static void NoteComputeWaitDrain(const PM4CmdWaitRegMem& wait, bool satisfied) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_COMPUTE_WAIT_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::unordered_map<VAddr, std::pair<u32, u32>> labels; // satisfied, still unmet
+    static u32 met = 0, unmet = 0;
+    static auto last = std::chrono::steady_clock::now();
+    std::scoped_lock lock{mutex};
+    auto& label = labels[wait.mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory
+                             ? wait.Address<VAddr>()
+                             : VAddr{0}];
+    ++(satisfied ? label.first : label.second);
+    ++(satisfied ? met : unmet);
+    if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds{5}) {
+        last = now;
+        std::vector<std::pair<u32, VAddr>> top;
+        for (const auto& [address, counts] : labels) {
+            top.emplace_back(counts.first + counts.second, address);
+        }
+        std::ranges::sort(top, std::greater{});
+        std::string text;
+        for (size_t i = 0; i < std::min<size_t>(top.size(), 6); ++i) {
+            const auto& counts = labels[top[i].second];
+            text += fmt::format(" {:#x} {}/{}", top[i].second, counts.first, counts.second);
+        }
+        std::printf("Compute wait drains (5 s): %u satisfied by the drain, %u not; labels "
+                    "(satisfied/not):%s\n",
+                    met, unmet, text.c_str());
+        std::fflush(stdout);
+        labels.clear();
+        met = unmet = 0;
+    }
+}
+
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
@@ -2837,9 +2907,27 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     break;
                 }
                 if (!LandDeferredFenceFor(*wait_reg_mem, regs)) {
+                    // gow3 24 Oct 2026: drained only when the draw recording thread holds a
+                    // write to the label (a fence, a WRITE_DATA, a compute release), or deferred
+                    // fences could land there. In a heavy area of The Last of Us ~1,200 drains a
+                    // second satisfied ~1% of these waits (the labels are the compute queues'
+                    // own, written by queues this thread runs next): 16-18% of this thread spent
+                    // waiting for nothing. Other waits yield to the other queues; the draw
+                    // recording thread runs on meanwhile. GOW3_COMPUTE_WAIT_DRAIN=all: every
+                    // unmet wait drains, as before.
+                    static const bool drain_all = [] {
+                        const char* env = std::getenv("GOW3_COMPUTE_WAIT_DRAIN");
+                        return env && std::string_view{env} == "all";
+                    }();
+                    const bool memory_wait =
+                        wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
                     while (!wait_reg_mem->Test(regs.reg_array)) {
-                        if (rasterizer && !rasterizer->DrawPipeIdle()) {
+                        if (rasterizer && !rasterizer->DrawPipeIdle() &&
+                            (drain_all || !memory_wait ||
+                             HasPendingWrite(wait_reg_mem->Address<VAddr>()) ||
+                             rasterizer->GetBufferCache().HasDeferredSignals())) {
                             rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
+                            NoteComputeWaitDrain(*wait_reg_mem, wait_reg_mem->Test(regs.reg_array));
                             continue;
                         }
                         YIELD_ASC(vqid);
@@ -2858,7 +2946,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
                 ComputeRelease release{.packet = *release_mem, .pipe_id = queue.pipe_id};
-                rasterizer->RunInOrder(&RunComputeReleaseMem, &release, sizeof(release));
+                if (rasterizer->RunInOrder(&RunComputeReleaseMem, &release, sizeof(release)) &&
+                    release_mem->data_sel.Value() != DataSelect::GdsMemStore) {
+                    NotePendingRelease(*release_mem);
+                }
                 break;
             }
             release_mem->SignalFence(

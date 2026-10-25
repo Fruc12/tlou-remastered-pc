@@ -102,6 +102,44 @@ static u32 BufferImageCopySize(const vk::BufferImageCopy& copy, const vk::Format
            width_in_blocks * block_size;
 }
 
+// gow3 24 Oct 2026 diagnostics: buffer/image copy regions past the buffer's end or the image's
+// level are logged (the first 16), as buffer copies are (CopyBuffer).
+static void CheckImageCopies(const char* what, const VideoCore::Image& image,
+                             const VideoCore::Buffer& buffer,
+                             std::span<const vk::BufferImageCopy> copies) {
+    static std::atomic<u32> logged{0};
+    for (const auto& copy : copies) {
+        const u32 level = copy.imageSubresource.mipLevel;
+        const u32 width = std::max(image.info.size.width >> level, 1u);
+        const u32 height = std::max(image.info.size.height >> level, 1u);
+        const u32 depth = std::max(image.info.size.depth >> level, 1u);
+        const u64 size = BufferImageCopySize(copy, image.info.pixel_format);
+        const bool past_buffer = copy.bufferOffset + size > buffer.SizeBytes();
+        const bool past_image =
+            level >= image.info.resources.levels ||
+            u32(copy.imageOffset.x) + copy.imageExtent.width > width ||
+            u32(copy.imageOffset.y) + copy.imageExtent.height > height ||
+            u32(copy.imageOffset.z) + copy.imageExtent.depth > depth ||
+            copy.imageSubresource.baseArrayLayer + copy.imageSubresource.layerCount >
+                image.info.resources.layers;
+        if ((past_buffer || past_image) && logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            std::printf("Image %s past %s: image %#llx %ux%ux%u levels %u layers %u, level %u "
+                        "offset %d,%d,%d extent %ux%ux%u layers %u+%u; buffer %#llx size %#llx, "
+                        "offset %#llx + %#llx\n",
+                        what, past_buffer ? "the buffer's end" : "the image",
+                        (unsigned long long)image.info.guest_address, image.info.size.width,
+                        image.info.size.height, image.info.size.depth, image.info.resources.levels,
+                        image.info.resources.layers, level, copy.imageOffset.x, copy.imageOffset.y,
+                        copy.imageOffset.z, copy.imageExtent.width, copy.imageExtent.height,
+                        copy.imageExtent.depth, copy.imageSubresource.baseArrayLayer,
+                        copy.imageSubresource.layerCount, (unsigned long long)buffer.CpuAddr(),
+                        (unsigned long long)buffer.SizeBytes(), (unsigned long long)copy.bufferOffset,
+                        (unsigned long long)size);
+            std::fflush(stdout);
+        }
+    }
+}
+
 Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
     : instance{instance_}, scheduler{scheduler_}, staging_pool{instance_, scheduler_} {
     blit_helper = std::make_unique<VideoCore::BlitHelper>(instance, scheduler);
@@ -153,6 +191,30 @@ void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* 
         NoteBarrierStat(1, bytes);
     }
 
+    // gow3 24 Oct 2026 diagnostics: a region past either buffer's end is logged (the first 16);
+    // with GPU checkpoints each copy is named in the device loss report. The Last of Us lost the
+    // device between two copy-shader dispatches, where only such copies were recorded.
+    for (const auto& copy : copies) {
+        if (copy.srcOffset + copy.size > src->SizeBytes() ||
+            copy.dstOffset + copy.size > dst->SizeBytes()) {
+            static std::atomic<u32> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+                std::printf("Buffer copy past a buffer's end: %#llx+%#llx of %#llx (%#llx) -> "
+                            "%#llx+%#llx of %#llx (%#llx)\n",
+                            (unsigned long long)copy.srcOffset, (unsigned long long)copy.size,
+                            (unsigned long long)src->SizeBytes(), (unsigned long long)src->CpuAddr(),
+                            (unsigned long long)copy.dstOffset, (unsigned long long)copy.size,
+                            (unsigned long long)dst->SizeBytes(), (unsigned long long)dst->CpuAddr());
+                std::fflush(stdout);
+            }
+        }
+    }
+    if (instance.HasGpuCheckpoints()) {
+        for (size_t i = 0; i < std::min<size_t>(copies.size(), 4); ++i) {
+            scheduler.Checkpoint("copy", dst->CpuAddr() + copies[i].dstOffset,
+                                 copies[i].size | u64(src->CpuAddr() + copies[i].srcOffset) << 24);
+        }
+    }
     scheduler.Record([src_handle = src->Handle(), dst_handle = dst->Handle(),
                       regions = scheduler.RecordData(copies)](vk::CommandBuffer cmdbuf) {
         cmdbuf.copyBuffer(src_handle, dst_handle, regions.size(), regions.data());
@@ -180,6 +242,19 @@ void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32
         FlushBarriers();
     }
 
+    // gow3 diagnostics: as CopyBuffer.
+    if (size != VK_WHOLE_SIZE && offset + size > dst->SizeBytes()) {
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            std::printf("Buffer fill past the buffer's end: %#llx+%#llx of %#llx (%#llx)\n",
+                        (unsigned long long)offset, (unsigned long long)size,
+                        (unsigned long long)dst->SizeBytes(), (unsigned long long)dst->CpuAddr());
+            std::fflush(stdout);
+        }
+    }
+    if (instance.HasGpuCheckpoints()) {
+        scheduler.Checkpoint("fill", dst->CpuAddr() + offset, size);
+    }
     scheduler.Record([handle = dst->Handle(), offset, size, value](vk::CommandBuffer cmdbuf) {
         cmdbuf.fillBuffer(handle, offset, size, value);
     });
@@ -272,6 +347,11 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
         FlushBarriers();
     }
 
+    CheckImageCopies("upload", *dst, *src, upload_copies);
+    if (instance.HasGpuCheckpoints()) {
+        scheduler.Checkpoint("image upload", dst->info.guest_address,
+                             src->CpuAddr() + (upload_copies.empty() ? 0 : upload_copies[0].bufferOffset));
+    }
     scheduler.Record([src_handle = src->Handle(), image = dst->GetImage(),
                       regions = scheduler.RecordData(upload_copies)](vk::CommandBuffer cmdbuf) {
         cmdbuf.copyBufferToImage(src_handle, image, vk::ImageLayout::eTransferDstOptimal,
@@ -331,6 +411,11 @@ void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
         FlushBarriers();
     }
 
+    CheckImageCopies("download", *src, *dst, download_copies);
+    if (instance.HasGpuCheckpoints()) {
+        scheduler.Checkpoint("image download", src->info.guest_address,
+                             dst->CpuAddr() + (download_copies.empty() ? 0 : download_copies[0].bufferOffset));
+    }
     scheduler.Record([image = src->GetImage(), buffer = dst->Handle(),
                       regions = scheduler.RecordData(download_copies)](vk::CommandBuffer cmdbuf) {
         cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, buffer,
@@ -355,10 +440,26 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
                   vk::to_string(src->info.pixel_format), vk::to_string(dst->info.pixel_format));
     }
 
-    const u32 base_width = src->info.size.width;
-    const u32 base_height = src->info.size.height;
+    // gow3 24 Oct 2026: the copy covers what both images have. The source's size was used: a
+    // depth target recreated smaller (ResolveDepthOverlap, D32S8 -> D32 after The Last of Us
+    // unloaded a level's packages) took a copy past the end of the new image, and the device was
+    // lost a moment later, every time at the same place.
+    const u32 base_width = std::min(src->info.size.width, dst->info.size.width);
+    const u32 base_height = std::min(src->info.size.height, dst->info.size.height);
     const u32 base_depth =
         dst->info.type == AmdGpu::ImageType::Color3D ? dst->info.size.depth : src->info.size.depth;
+    if (src->info.size.width != dst->info.size.width ||
+        src->info.size.height != dst->info.size.height) {
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            std::printf("Image copy between sizes: %ux%u %s -> %ux%u %s (copied %ux%u)\n",
+                        src->info.size.width, src->info.size.height,
+                        vk::to_string(src->info.pixel_format).c_str(), dst->info.size.width,
+                        dst->info.size.height, vk::to_string(dst->info.pixel_format).c_str(),
+                        base_width, base_height);
+            std::fflush(stdout);
+        }
+    }
 
     // Match sample count before copying
     SetBackingSamples(dst, dst->info.num_samples, false);
@@ -464,7 +565,10 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
             .layerCount = num_layers,
         },
         .imageOffset = {0, 0, 0},
-        .imageExtent = {src->info.size.width, src->info.size.height, src->info.size.depth},
+        // gow3 24 Oct 2026: what both images have (CopyImage).
+        .imageExtent = {std::min(src->info.size.width, dst->info.size.width),
+                        std::min(src->info.size.height, dst->info.size.height),
+                        std::min(src->info.size.depth, dst->info.size.depth)},
     };
     const auto copy_size = BufferImageCopySize(buffer_copy, src->info.pixel_format);
 
@@ -562,8 +666,28 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
-        if (instance.IsMaintenance8Supported() ||
-            src->info.props.is_depth == dst->info.props.is_depth) {
+        // gow3 24 Oct 2026: depth images of different formats (D32_SFLOAT_S8_UINT and
+        // D32_SFLOAT: 8 and 4 bytes a texel on NVIDIA) go through the copy buffer as well: an
+        // image copy between them is invalid (VUID-vkCmdCopyImage-srcImage-01548), and one came
+        // right before The Last of Us lost the device at a level change, every time.
+        const bool depth_formats_differ = src->info.props.is_depth && dst->info.props.is_depth &&
+                                          src->info.pixel_format != dst->info.pixel_format;
+        if (depth_formats_differ &&
+            (src->info.resources.levels != 1 || dst->info.resources.levels != 1 ||
+             src->info.resources.layers != dst->info.resources.layers)) {
+            // The buffer path copies one level of equal layers; the old contents are dropped
+            // instead (the game draws the depth target again).
+            static std::atomic<u32> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+                std::printf("Depth copy between formats skipped: %s %u levels %u layers -> %s %u "
+                            "levels %u layers\n",
+                            vk::to_string(src->info.pixel_format).c_str(), src->info.resources.levels,
+                            src->info.resources.layers, vk::to_string(dst->info.pixel_format).c_str(),
+                            dst->info.resources.levels, dst->info.resources.layers);
+                std::fflush(stdout);
+            }
+        } else if (!depth_formats_differ && (instance.IsMaintenance8Supported() ||
+                                             src->info.props.is_depth == dst->info.props.is_depth)) {
             CopyImage(src, dst);
         } else {
             // Perform depth from/to color copy using the intermediate copy buffer.
@@ -624,7 +748,9 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
             .layerCount = sub_range.extent.layers,
         },
         .dstOffset = {0, 0, 0},
-        .extent = {dst->info.size.width, dst->info.size.height, 1},
+        // gow3 24 Oct 2026: what both images have (CopyImage).
+        .extent = {std::min(src->info.size.width, dst->info.size.width),
+                   std::min(src->info.size.height, dst->info.size.height), 1},
     };
 
     scheduler.Record([src_image = src->GetImage(), dst_image = dst->GetImage(),

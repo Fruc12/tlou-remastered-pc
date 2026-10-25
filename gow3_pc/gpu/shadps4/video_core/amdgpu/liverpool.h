@@ -85,6 +85,9 @@ struct Liverpool {
     std::deque<PendingFence> pending_fences;
     void NotePendingFences(const auto& event);
     bool PendingFenceValue(VAddr address, u32& value);
+    void NotePendingRelease(const struct PM4CmdReleaseMem& release);
+    /// Stage A: the draw recording thread still holds a fence or WRITE_DATA for `address`.
+    bool HasPendingWrite(VAddr address);
     bool LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& state);
     void NotePendingWrite(const struct PM4CmdWriteData& write_data, u32 num_bytes);
     /// gow3: running checksum of graphics-register packets (see ApplyGraphicsRegisterPacket).

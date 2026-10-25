@@ -2807,6 +2807,77 @@ static void RecordFullBarrier(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
+// gow3 24 Oct 2026 diagnostics (GOW3_TRACE_DISPATCH=<hex>,...): the last 64 dispatches of these
+// shaders (tick, groups, bound buffers), printed when the device is lost (DumpDeviceFault). The
+// Last of Us lost it with a GPU copy shader (82c46b8b) in flight; checkpoint markers on every
+// dispatch slowed it enough that the level never unloaded.
+namespace {
+struct TracedDispatch {
+    u64 serial, hash, tick;
+    u32 dim[3];
+    u32 count;
+    struct {
+        u64 address;
+        u32 size;
+        bool written;
+    } buffers[4];
+};
+std::mutex traced_dispatch_mutex;
+std::array<TracedDispatch, 64> traced_dispatches{};
+u64 traced_dispatch_serial = 0;
+const std::vector<u64>& TracedDispatchHashes() {
+    static const std::vector<u64> hashes = [] {
+        std::vector<u64> out;
+        for (const char* env = std::getenv("GOW3_TRACE_DISPATCH"); env && *env;) {
+            char* end = nullptr;
+            out.push_back(std::strtoull(env, &end, 16));
+            env = end && *end == ',' ? end + 1 : nullptr;
+        }
+        return out;
+    }();
+    return hashes;
+}
+} // namespace
+
+void DumpTracedDispatches() {
+    if (TracedDispatchHashes().empty()) {
+        return;
+    }
+    std::scoped_lock lock{traced_dispatch_mutex};
+    const u64 last = traced_dispatch_serial;
+    std::fprintf(stderr, "Traced dispatches (newest last, %llu recorded):\n",
+                 static_cast<unsigned long long>(last));
+    for (u64 serial = last > traced_dispatches.size() ? last - traced_dispatches.size() : 0;
+         serial < last; ++serial) {
+        const auto& d = traced_dispatches[serial % traced_dispatches.size()];
+        std::fprintf(stderr, "  #%llu shader %#llx tick %llu groups %ux%ux%u:",
+                     static_cast<unsigned long long>(d.serial), static_cast<unsigned long long>(d.hash),
+                     static_cast<unsigned long long>(d.tick), d.dim[0], d.dim[1], d.dim[2]);
+        for (u32 i = 0; i < d.count; ++i) {
+            std::fprintf(stderr, " %s %#llx+%#x", d.buffers[i].written ? "w" : "r",
+                         static_cast<unsigned long long>(d.buffers[i].address), d.buffers[i].size);
+        }
+        std::fprintf(stderr, "\n");
+    }
+}
+
+void Rasterizer::NoteTracedDispatch(u64 hash, u32 x, u32 y, u32 z) {
+    const auto& hashes = TracedDispatchHashes();
+    if (hashes.empty() || std::ranges::find(hashes, hash) == hashes.end()) {
+        return;
+    }
+    std::scoped_lock lock{traced_dispatch_mutex};
+    auto& d = traced_dispatches[traced_dispatch_serial % traced_dispatches.size()];
+    d = {.serial = traced_dispatch_serial++, .hash = hash, .tick = scheduler.CurrentTick(),
+         .dim = {x, y, z}};
+    for (const auto& bound : bound_buffers) {
+        if (d.count == std::size(d.buffers)) {
+            break;
+        }
+        d.buffers[d.count++] = {bound.buffer->CpuAddr() + bound.offset, bound.size, bound.is_written};
+    }
+}
+
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
@@ -2934,6 +3005,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    NoteTracedDispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     scheduler.Checkpoint("dispatch",cs.pgm_hash);
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
@@ -3075,6 +3147,30 @@ u64 Rasterizer::Flush() {
 void Rasterizer::Finish() {
     DrainDrawPipe();
     scheduler.Finish();
+}
+
+void Rasterizer::EndSubmission() {
+    // gow3 24 Oct 2026: the per-submission upkeep (OnSubmit: the buffer and texture caches, the
+    // readbacks, all owned by the draw recording thread while it runs) and the flush run in order
+    // on that thread. Draining it first made the GPU command thread wait ~11% of its time in a
+    // heavy area of The Last of Us (the player's profile), with nothing decoded meanwhile.
+    // GOW3_ORDERED_SUBMIT=0: drained here, as before.
+    static const bool ordered = [] {
+        const char* env = std::getenv("GOW3_ORDERED_SUBMIT");
+        return !(env && env[0] == '0');
+    }();
+    if (!ordered || !UseDrawPipe()) {
+        OnSubmit();
+        Flush();
+        return;
+    }
+    const u8 unused = 0;
+    RunInOrder(
+        [](Rasterizer& rasterizer, const u8*) {
+            rasterizer.OnSubmit();
+            rasterizer.Flush();
+        },
+        &unused, sizeof(unused));
 }
 
 void Rasterizer::OnSubmit() {
@@ -5070,6 +5166,25 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
             }
             if (unbound || garbage) {
+                // gow3 diagnostics (GOW3_TRACE_NULL_WRITES=1, as for images below).
+                static const bool trace_null = [] {
+                    const char* env = std::getenv("GOW3_TRACE_NULL_WRITES");
+                    return env && env[0] == '1';
+                }();
+                if (trace_null && desc.is_written) {
+                    static std::mutex mutex;
+                    static std::unordered_map<u64, u32> seen;
+                    std::scoped_lock lock{mutex};
+                    if (seen[stage.pgm_hash]++ < 4) {
+                        std::printf("Null written buffer: shader %#llx slot %u (%s): V# %#llx size "
+                                    "%u\n",
+                                    static_cast<unsigned long long>(stage.pgm_hash), binding.buffer,
+                                    garbage ? "garbage" : "unbound",
+                                    static_cast<unsigned long long>(vsharp.base_address),
+                                    u32(vsharp.GetSize()));
+                        std::fflush(stdout);
+                    }
+                }
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
                 const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
@@ -5187,6 +5302,29 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     Gow3WatchRange::Note("storage", stage.pgm_hash, binding.buffer,
                                          vsharp.base_address, size);
                     VideoCore::NoteGpuWriter(vsharp.base_address, size, stage.pgm_hash);
+                    // gow3 24 Oct 2026 diagnostics: The Last of Us's result bindings left without
+                    // a readback (too large, or past the 256 ranges an event holds), every 5 s.
+                    if (TlouEopReadbackBinding(stage.pgm_hash, binding.buffer)) {
+                        static std::atomic<u32> results{0}, too_large{0}, over_cap{0};
+                        static std::atomic<s64> last_report{0};
+                        ++results;
+                        if (size > 64_KB) {
+                            ++too_large;
+                        } else if (eop_readbacks.size() + eop_open_readbacks.size() >= 256) {
+                            ++over_cap;
+                        }
+                        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                                            std::chrono::steady_clock::now().time_since_epoch())
+                                            .count();
+                        if (s64 last = last_report.load(std::memory_order_relaxed);
+                            now - last >= 5 && last_report.compare_exchange_strong(last, now)) {
+                            std::printf("Physics result readbacks (5 s): %u results, %u too large, "
+                                        "%u over the 256 per event\n",
+                                        results.exchange(0), too_large.exchange(0),
+                                        over_cap.exchange(0));
+                            std::fflush(stdout);
+                        }
+                    }
                     if (IsEopReadbackBinding(stage.pgm_hash, binding.buffer, size) &&
                         eop_readbacks.size() + eop_open_readbacks.size() < 256) {
                         // The whole bound buffer counts as GPU-written (up to 9 MiB for
@@ -5466,7 +5604,31 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
+        // gow3 24 Oct 2026 diagnostics (GOW3_TRACE_NULL_WRITES=1): a written image bound as a
+        // null descriptor, per shader (first 4 each). With the device fault report on, The Last
+        // of Us lost the device at its menu on a write to GPU address 0.
+        const auto trace_null_write = [&](const char* why) {
+            static const bool on = [] {
+                const char* env = std::getenv("GOW3_TRACE_NULL_WRITES");
+                return env && env[0] == '1';
+            }();
+            if (!on || !image_desc.is_written) {
+                return;
+            }
+            static std::mutex mutex;
+            static std::unordered_map<u64, u32> seen;
+            std::scoped_lock lock{mutex};
+            if (seen[stage.pgm_hash]++ < 4) {
+                std::printf("Null written image: shader %#llx image %u (%s): T# %#llx %ux%u format "
+                            "%u/%u\n",
+                            static_cast<unsigned long long>(stage.pgm_hash), image_index, why,
+                            static_cast<unsigned long long>(tsharp.Address()), u32(tsharp.width) + 1,
+                            u32(tsharp.height) + 1, u32(data_fmt), u32(num_fmt));
+                std::fflush(stdout);
+            }
+        };
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
+            trace_null_write(tsharp.Address() == 0 ? "address 0" : "invalid format");
             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
             image_binding_entries.push_back(nullptr);
             binding_proxy_ok.push_back(false);
@@ -5484,6 +5646,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             if (!prepared && !on_helper && (image_desc.sharp_fetch.load_mask & 1)) {
                 DescribeSharpSource(stage, image_desc.sharp_fetch.offsets[0], "texture");
             }
+            trace_null_write("rejected T#");
             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
             image_binding_entries.push_back(nullptr);
             binding_proxy_ok.push_back(false);

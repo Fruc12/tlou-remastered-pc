@@ -623,7 +623,11 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
     drop_range(start,end);
     return 0;
 }
+/* gow3 24 Oct 2026 diagnostics (GOW3_TRACE_MAPS=1): every unmap and direct memory release with its
+ * range (The Last of Us lost the GPU device right after unloading a level's packages). */
+static int trace_maps(void) { static int v=-1; if (v<0) { const char *e=getenv("GOW3_TRACE_MAPS"); v=e && e[0]=='1'; } return v; }
 static ABI int32_t direct_unmap(void *address, uint64_t size) {
+    if (trace_maps()) printf("Map trace: munmap %p + %#llx\n",address,(unsigned long long)size);
     const uint64_t start=mono_ns();
     /* The GPU forgets the range before it disappears (as shadPS4's early GPU unmap). */
     if (hook_unmap && !((uintptr_t)address%PAGE) && size) hook_unmap((uintptr_t)address,align_up(size,PAGE));
@@ -638,6 +642,7 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
     return result;
 }
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
+    if (trace_maps()) printf("Map trace: release direct %#llx + %#llx\n",(unsigned long long)start,(unsigned long long)size);
     if (start % PAGE || size % PAGE) return INVALID;
     if (!size) return 0;
     const uint64_t release_start=mono_ns();

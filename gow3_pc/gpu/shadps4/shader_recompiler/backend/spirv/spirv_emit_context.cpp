@@ -1044,6 +1044,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .is_integer = is_integer,
             .is_storage = is_storage,
             .mip_fallback_mode = mip_fallback_mode,
+            .num_bindings = num_bindings,
         });
         interfaces.push_back(id);
     }

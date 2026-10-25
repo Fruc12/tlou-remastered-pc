@@ -437,6 +437,16 @@ bool Instance::CreateDevice() {
         device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         address_binding_report=add_extension(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
         std::printf("GPU device fault reports enabled: %d\n",int(device_fault));
+    } else if (diag && diag[0]=='4') {
+        // =4: the checkpoints alone, without the fault report that loses the device at the menu.
+        gpu_checkpoints=add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        std::printf("GPU checkpoints enabled: %d (no fault report)\n",int(gpu_checkpoints));
+    } else if (diag && diag[0]=='3') {
+        // gow3 24 Oct 2026: =3, the fault report alone. With the checkpoints (1, 2) The Last of
+        // Us lost the device at its main menu, every time (a write to GPU address 0 after
+        // dispatch 15d34dcb), while its own device loss came minutes into a level.
+        device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        std::printf("GPU device fault reports enabled: %d (no checkpoints)\n",int(device_fault));
     }
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&

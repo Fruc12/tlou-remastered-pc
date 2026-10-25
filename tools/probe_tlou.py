@@ -249,10 +249,25 @@ def main():
     # 2026) after playing it: it felt smoother there; the measured runs saw different parts of
     # the scene, so no clean number.
     env.setdefault("GOW3_FEWER_DRAINS", "1")
+    # The 480 Hz vblank (frames shown when they are done, the frame rate capped at the display's):
+    # at a 60 Hz vblank the game waits for the next one, so frames of the heavy areas took
+    # 16.7/33.3/50 ms in turn (~30 FPS), and Joel's hair stretched now and then. The player's
+    # session with it (24 Oct 2026): 30-34 FPS there, no stretching, normal game speed.
+    env.setdefault("GOW3_VBLANK_HZ", "0")
     env.setdefault("GOW3_NATIVE_TSC", "1")
     env.setdefault("GOW3_FRAME_STATS", "1")
     # Scripted controller input (tools/tlou_pad.py writes it).
     env.setdefault("GOW3_PAD_FILE", str(user / "probe-pad.txt"))
+    # 24 Oct 2026: the player's sessions record their controller input from the first press
+    # (GOW3_PAD_RECORD, flushed as it goes), one file per session, the newest 5 kept: a device loss
+    # came minutes into a level only on some routes, and a recording replays the route in a test
+    # profile (GOW3_PAD_REPLAY). Test runs (--saves) record nothing; TLOU_RECORD_PAD=0 turns it off.
+    if not args.saves and os.environ.get("TLOU_RECORD_PAD") != "0" and "GOW3_PAD_RECORD" not in env:
+        records = sorted(out.glob("pad-record-*.txt"))
+        for old in records[:-4]:
+            old.unlink(missing_ok=True)
+        env["GOW3_PAD_RECORD"] = str(out / f"pad-record-{time.strftime('%Y%m%d-%H%M%S')}.txt")
+        (user / "probe-pad.txt").write_text("record", encoding="ascii")
     # Diagnostics driven by tlou_pad.py: the frame analyzer (every pass, its shaders and textures,
     # written to <user>/captures) and shaders whose draws are skipped (hex hashes, re-read live).
     env.setdefault("GOW3_CAPTURE_TRIGGER", str(user / "capture.trigger"))

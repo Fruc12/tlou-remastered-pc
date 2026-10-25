@@ -6645,8 +6645,15 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
     ScopeMarkerEnd();
 }
 
-void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
+void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds,
+                            bool order_guest_writes) {
     DrainDrawPipe();
+    const auto order = [&] {
+        if (order_guest_writes) {
+            WaitHostCopies();
+            WaitDeferredSignals();
+        }
+    };
     if (!is_gds) {
         Gow3WatchRange::Note("fill", value, 0, address, num_bytes);
         VideoCore::NoteRecentGpuWrite(address, num_bytes, VideoCore::GpuWriterFill);
@@ -6656,6 +6663,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
     if (!is_gds) {
         texture_cache.ClearMeta(address);
         if (!buffer_cache.IsRegionGpuModified(address, num_bytes)) {
+            order();
             u32* buffer = std::bit_cast<u32*>(address);
             std::fill(buffer, buffer + (num_bytes / sizeof(u32)), value);
             return;
@@ -6664,6 +6672,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
         // reads on the CPU) land in guest memory too, not only in the GPU's copy.
         if (num_bytes <= 64_KB) {
             const std::vector<u32> pattern(num_bytes / sizeof(u32), value);
+            order();
             if (buffer_cache.WriteThrough(address, pattern.data(), num_bytes)) {
                 return;
             }
@@ -6683,8 +6692,15 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
     }
 }
 
-void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds,
+                            bool order_guest_writes) {
     DrainDrawPipe();
+    const auto order = [&] {
+        if (order_guest_writes) {
+            WaitHostCopies();
+            WaitDeferredSignals();
+        }
+    };
     // gow3: the two GPU-modified lookups only choose the watch line's text (GOW3_WATCH_RANGE).
     if (!dst_gds && !Gow3WatchRange::Ranges().empty()) {
         Gow3WatchRange::Note(buffer_cache.IsRegionGpuModified(dst, num_bytes) ||
@@ -6706,6 +6722,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
             // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
+            order();
             std::memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
             return;
         }
@@ -6720,6 +6737,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         if (!memory->TryReadBacking(src, data.data(), num_bytes)) {
             std::memcpy(data.data(), std::bit_cast<const void*>(src), num_bytes);
         }
+        order();
         if (buffer_cache.WriteThrough(dst, data.data(), num_bytes)) {
             return;
         }

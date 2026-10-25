@@ -24,6 +24,7 @@
 #include "common/alignment.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
@@ -456,6 +457,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
     page_manager = &tracker;
+    static BufferCache* wait_label_cache = nullptr;
+    wait_label_cache = this;
+    AmdGpu::g_read_wait_label = [](uintptr_t address) {
+        return wait_label_cache->ReadWaitLabel(static_cast<VAddr>(address));
+    };
     while (arena_page_bits > MIN_ARENA_PAGE_BITS &&
            (u64{2} << arena_page_bits) > instance.GetMaxBufferSize()) {
         --arena_page_bits;
@@ -766,6 +772,9 @@ static std::atomic<u32> g_readback_read_waits;
 // hit those GPU bytes, or only other data on their page; time the faulting thread waited for the
 // GPU thread to take the request, and for the readback itself (microseconds).
 static std::atomic<u32> g_read_on_gpu_bytes, g_read_same_page;
+static std::atomic<u32> g_read_no_gpu_bytes; // gow3 25 Oct 2026: read faults beside no GPU bytes
+static std::atomic<u32> g_poisoned_page_writes; // gow3 25 Oct 2026: writes a poisoned page took
+static std::atomic<u32> g_label_backing_reads;  // gow3 25 Oct 2026: BufferCache::ReadWaitLabel
 static std::atomic<u32> g_pieces_recurring, g_pieces_protected;
 static std::atomic<u64> g_readback_bytes;
 // gow3 statistics: fences deferred to ray-cast readbacks (label, delay until written).
@@ -1013,7 +1022,9 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                                                    bits & 32 ? ",open" : "", n);
                         }
                     }
-                    std::printf("  full downloads by case:%s\n", reasons.c_str());
+                    std::printf("  full downloads by case:%s; writes into poisoned shared pages that "
+                                "went ahead: %u\n",
+                                reasons.c_str(), g_poisoned_page_writes.exchange(0));
                 }
                 std::printf("  pages with old GPU bytes fetched on the second queue: %u\n",
                             g_old_byte_fetches.exchange(0));
@@ -1072,9 +1083,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     const u64 wait_us = g_read_wait_us.exchange(0);
                     std::printf("  CPU read faults on readback pages: %u on the GPU bytes, %u elsewhere on "
                                 "their page; %.1f ms in all, %.1f ms of it waiting for the GPU; readback "
-                                "pieces: %u recurring (readable), %u new (protected)\n",
+                                "pieces: %u recurring (readable), %u new (protected); reads of no GPU "
+                                "bytes unprotected without a download: %u; wait labels read through "
+                                "the backing view: %u\n",
                                 on_bytes, same_page, total_us / 1e3, wait_us / 1e3,
-                                g_pieces_recurring.exchange(0), g_pieces_protected.exchange(0));
+                                g_pieces_recurring.exchange(0), g_pieces_protected.exchange(0),
+                                g_read_no_gpu_bytes.exchange(0), g_label_backing_reads.exchange(0));
                     std::scoped_lock lock{g_read_pieces_mutex};
                     std::vector<std::pair<u32, u64>> pieces;
                     for (const auto& [key, n] : g_read_pieces) {
@@ -1211,6 +1225,22 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     return;
                 }
             }
+        }
+        // gow3 25 Oct 2026: a read of no GPU-written bytes needs no download. The GPU command
+        // thread's memory waits read their labels (which the runtime writes into guest memory) on
+        // pages read-protected for no submitted readback of theirs (merged watch ranges, or an
+        // unsubmitted one): each read downloaded a 512 KiB window and waited for all GPU work
+        // (~90 per 5 s in the Quarantine Zone, 7.5% of that thread). The page is unprotected.
+        if (!is_write && EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Relaxed &&
+            !gpu_modified_ranges.Intersects(device_addr, size)) {
+            const VAddr page = Common::AlignDown(device_addr, 4096);
+            const VAddr end = Common::AlignUp(device_addr + size, 4096);
+            for (VAddr p = page; p < end; p += 4096) {
+                UnwatchPage(p);
+                ReleaseOrphanReadWatch(p);
+            }
+            g_read_no_gpu_bytes.fetch_add(1, std::memory_order_relaxed);
+            return;
         }
         if (is_write) {
             cpu_write_hot[device_addr >> 20] = std::chrono::steady_clock::now(); // GPU-side (command or inline)
@@ -1588,6 +1618,20 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     share_page(shared_readbacks);
                     return;
                 }
+            }
+            // gow3 25 Oct 2026: any write into a poisoned shared page (protected again after an
+            // upload), into its GPU bytes too: the poison shows the uploads and write-backs which
+            // bytes the game wrote (per 4-byte group), so it goes ahead; its GPU bytes are read
+            // back after the submission. Each such write downloaded a 512 KiB window and waited
+            // for all GPU work (20-47 per 5 s in the Quarantine Zone).
+            if (const auto lazy = lazy_pages.find(page);
+                lazy != lazy_pages.end() && lazy->second->poisoned && device_addr + size <= page + 4096) {
+                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                unfinished_shared_readbacks.emplace_back(page, 4096);
+                g_poisoned_page_writes.fetch_add(1, std::memory_order_relaxed);
+                NotePoisonEvent(page, gpu_modified_ranges.Intersects(device_addr, size) ? "write-into"
+                                                                                          : "write-beside");
+                return;
             }
             if (TryLazyWrite(device_addr, size)) {
                 return;
@@ -2672,6 +2716,18 @@ void BufferCache::RestorePoison(VAddr lo, VAddr hi) {
     }
 }
 
+u32 BufferCache::ReadWaitLabel(VAddr address) const {
+    if (page_manager && page_manager->IsReadWatched(address) &&
+        !IsRangeGpuWrittenShared(address, sizeof(u32))) {
+        u32 value;
+        if (memory->TryReadBacking(address, &value, sizeof(value))) {
+            g_label_backing_reads.fetch_add(1, std::memory_order_relaxed);
+            return value;
+        }
+    }
+    return *std::bit_cast<const u32*>(address);
+}
+
 bool BufferCache::IsResultPage(VAddr page) {
     std::scoped_lock lock{result_pages_mutex};
     const auto it = result_pages.find(page >> 12);
@@ -3363,14 +3419,28 @@ bool BufferCache::DeferUntilLastReadback(std::function<void()> fn, VAddr label, 
         fn();
     };
     if (label) {
-        deferred_labels.insert(label);
-        deferred_values[label] = {value, bytes ? bytes : 4u, pending_readbacks.back().tick};
-        pending_readbacks.back().on_landed.emplace_back([this, label, fn = std::move(fn)] {
-            if (const auto it = deferred_labels.find(label); it != deferred_labels.end()) {
-                deferred_labels.erase(it);
+        const u32 label_bytes = bytes ? bytes : 4u;
+        {
+            // Read by the GPU command thread's waits (DeferredFenceTick) while this runs.
+            std::scoped_lock lock{deferred_mutex};
+            deferred_labels.insert(label);
+            deferred_values[label] = {value, label_bytes, pending_readbacks.back().tick};
+        }
+        for (VAddr dword = label; dword < label + label_bytes; dword += 4) {
+            deferred_label_filter[LabelSlot(dword)].fetch_add(1, std::memory_order_acq_rel);
+        }
+        pending_readbacks.back().on_landed.emplace_back([this, label, label_bytes, fn = std::move(fn)] {
+            {
+                std::scoped_lock lock{deferred_mutex};
+                if (const auto it = deferred_labels.find(label); it != deferred_labels.end()) {
+                    deferred_labels.erase(it);
+                }
+                if (!deferred_labels.contains(label)) {
+                    deferred_values.erase(label);
+                }
             }
-            if (!deferred_labels.contains(label)) {
-                deferred_values.erase(label);
+            for (VAddr dword = label; dword < label + label_bytes; dword += 4) {
+                deferred_label_filter[LabelSlot(dword)].fetch_sub(1, std::memory_order_acq_rel);
             }
             fn();
         });
@@ -3381,6 +3451,7 @@ bool BufferCache::DeferUntilLastReadback(std::function<void()> fn, VAddr label, 
 }
 
 bool BufferCache::DeferredFenceTick(VAddr address, u64& tick, u32* value) const {
+    std::scoped_lock lock{deferred_mutex};
     for (const auto& [label, deferred] : deferred_values) {
         if (address >= label && address + sizeof(u32) <= label + deferred.bytes) {
             tick = deferred.tick;

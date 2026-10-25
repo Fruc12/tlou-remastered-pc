@@ -747,6 +747,11 @@ struct PM4CmdRewind {
     }
 };
 
+/// gow3 25 Oct 2026: reads a memory wait's label (VideoCore::BufferCache::ReadWaitLabel: through
+/// the backing view where its page is read-protected for a readback and the label is no GPU
+/// data, instead of a read fault that drained the draw recording thread). Unset: a plain read.
+inline u32 (*g_read_wait_label)(uintptr_t address) = nullptr;
+
 struct PM4CmdWaitRegMem {
     enum class Engine : u32 { Me = 0u, Pfp = 1u };
     enum class MemSpace : u32 { Register = 0u, Memory = 1u };
@@ -789,7 +794,10 @@ struct PM4CmdWaitRegMem {
     }
 
     bool Test(std::span<const u32> regs) const {
-        return TestValue(mem_space.Value() == MemSpace::Memory ? *Address() : regs[Reg()]);
+        if (mem_space.Value() != MemSpace::Memory) {
+            return TestValue(regs[Reg()]);
+        }
+        return TestValue(g_read_wait_label ? g_read_wait_label(Address<uintptr_t>()) : *Address());
     }
 
     bool TestValue(u32 value) const {

@@ -938,8 +938,19 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         rasterizer.SignalAfterHostCopies([eop] { SignalEop(eop); });
     } else {
         // Labels are written in order: not before the ones deferred to the recording thread.
-        rasterizer.WaitHostCopies();
-        rasterizer.WaitDeferredSignals();
+        // gow3 25 Oct 2026: a fence deferred to a readback queued just now (results_pending)
+        // waits for none of them here: that readback lands once this submission is done on the
+        // GPU, and its submission waited for every copy issued before it, after the recording
+        // thread had written the signals deferred to it. Waiting here was ~27% of the draw
+        // recording thread with the DMA counters read back at every such event.
+        const bool to_new_readback = wait_readbacks && results_pending;
+        const auto order_writes = [&rasterizer] {
+            rasterizer.WaitHostCopies();
+            rasterizer.WaitDeferredSignals();
+        };
+        if (!to_new_readback) {
+            order_writes();
+        }
         const VAddr label =
             eop.data_sel.Value() == DataSelect::None ? 0 : reinterpret_cast<VAddr>(eop.Address<u32>());
         u64 value = 0;
@@ -1001,6 +1012,9 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
             }
             return;
         }
+        if (to_new_readback) {
+            order_writes();
+        }
         signal();
     }
 }
@@ -1047,8 +1061,12 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const bool results_pending = rasterizer.ReadBackEopResults(true);
     auto& cache = rasterizer.GetBufferCache();
     if (defer && sel != DataSelect::GdsMemStore && (results_pending || cache.HasDeferredSignals())) {
-        rasterizer.WaitHostCopies();
-        rasterizer.WaitDeferredSignals();
+        // gow3 25 Oct 2026: as in RunEventWriteEop, a fence deferred to a readback queued just
+        // now needs no wait here for the copies and signals issued before it.
+        if (!results_pending) {
+            rasterizer.WaitHostCopies();
+            rasterizer.WaitDeferredSignals();
+        }
         rasterizer.ProcessDownloadImages();
         const bool qword = sel != DataSelect::Data32Low;
         const VAddr label = sel == DataSelect::None ? 0 : release.packet.Address<VAddr>();
@@ -1062,6 +1080,10 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
                 rasterizer.Flush(); // the GPU starts on them now (RunEventWriteEop)
             }
             return;
+        }
+        if (results_pending) {
+            rasterizer.WaitHostCopies();
+            rasterizer.WaitDeferredSignals();
         }
         signal();
         return;
@@ -1165,9 +1187,11 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // paths): like WriteData, not before the copies and fences deferred to the recording thread.
     // With multithreaded rendering a DMA-written frame marker overtook the deferred
     // end-of-pipe timestamp of that frame (assert m_gfxEopTick in FrameBegin).
-    if (dma_data->dst_sel == DmaDataDst::Memory || dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
-        rasterizer.WaitHostCopies();
-        rasterizer.WaitDeferredSignals();
+    // gow3 25 Oct 2026: only those paths wait (Rasterizer::CopyBuffer/FillBuffer's
+    // order_guest_writes); the GPU path does not.
+    const bool to_memory =
+        dma_data->dst_sel == DmaDataDst::Memory || dma_data->dst_sel == DmaDataDst::MemoryUsingL2;
+    if (to_memory) {
         NoteOvertake(rasterizer, "dma", dma_data->DstAddress<VAddr>());
     }
     if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
@@ -1182,19 +1206,19 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
                (dma_data->dst_sel == DmaDataDst::Memory ||
                 dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
         rasterizer.FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
-                               dma_data->data, false);
+                               dma_data->data, false, true);
     } else if (dma_data->src_sel == DmaDataSrc::Gds &&
                (dma_data->dst_sel == DmaDataDst::Memory ||
                 dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
         rasterizer.CopyBuffer(dma_data->DstAddress<VAddr>(), dma_data->src_addr_lo,
-                               dma_data->NumBytes(), false, true);
+                               dma_data->NumBytes(), false, true, true);
     } else if ((dma_data->src_sel == DmaDataSrc::Memory ||
                 dma_data->src_sel == DmaDataSrc::MemoryUsingL2) &&
                (dma_data->dst_sel == DmaDataDst::Memory ||
                 dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
         rasterizer.CopyBuffer(dma_data->DstAddress<VAddr>(),
                                dma_data->SrcAddress<VAddr>(), dma_data->NumBytes(),
-                               false, false);
+                               false, false, true);
     } else {
         UNREACHABLE_MSG("WriteData src_sel = {}, dst_sel = {}", u32(dma_data->src_sel),
                         u32(dma_data->dst_sel));
@@ -1289,15 +1313,11 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
         return false;
     }
     auto& cache = rasterizer->GetBufferCache();
-    if (!cache.HasDeferredSignals()) {
-        return false;
-    }
-    // Multithreaded rendering: the deferred fences belong to the draw recording thread while it
-    // runs (an unmet wait drains it anyway).
-    rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
-    u64 tick = 0;
-    u32 value = 0;
-    if (!cache.DeferredFenceTick(wait.Address<VAddr>(), tick, &value)) {
+    // gow3 25 Oct 2026: only when a deferred fence may write this label (the filter is read
+    // without a drain). Any deferred fence drained here and in the compute wait loop: with the
+    // DMA counters' fences held too (GOW3_DMA_EOP_READBACK) ~1,600 compute waits per 5 s
+    // drained, 99% for nothing, and this thread waited ~29% of its time.
+    if (!cache.HasDeferredSignals() || !cache.MayBeLabelDeferred(wait.Address<VAddr>())) {
         return false;
     }
     // The deferred value counts as written: the GPU runs in stream order, so it would have written
@@ -1308,6 +1328,19 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
         const char* env = std::getenv("GOW3_DEFERRED_WAITS");
         return !(env && std::string_view{env} == "land");
     }();
+    // Multithreaded rendering: the readbacks belong to the draw recording thread while it runs,
+    // so landing one drains it first. The deferred values are read under their own lock
+    // (BufferCache::DeferredFenceTick): draining before every lookup was 21.6% of this thread
+    // once the compute wait loop looked up its labels (25 Oct 2026). A fence that thread has yet
+    // to defer is still a pending one here (PendingFenceValue, HasPendingWrite).
+    if (!pass) {
+        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+    }
+    u64 tick = 0;
+    u32 value = 0;
+    if (!cache.DeferredFenceTick(wait.Address<VAddr>(), tick, &value)) {
+        return false;
+    }
     if (pass) {
         return wait.TestValue(value);
     }
@@ -2926,10 +2959,34 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     const bool memory_wait =
                         wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
                     while (!wait_reg_mem->Test(regs.reg_array)) {
+                        // gow3 25 Oct 2026: a fence the draw recording thread deferred meanwhile
+                        // (written once its readback lands) counts as written here too, as at
+                        // the loop's start. Draining for it did not land it: ~3,000 drains per
+                        // 5 s for the compute queues' own labels (physics releases), 98% of them
+                        // for nothing.
+                        if (memory_wait && rasterizer &&
+                            rasterizer->GetBufferCache().MayBeLabelDeferred(
+                                wait_reg_mem->Address<VAddr>()) &&
+                            LandDeferredFenceFor(*wait_reg_mem, regs)) {
+                            break;
+                        }
+                        // gow3 25 Oct 2026: likewise a write handed to the draw recording thread
+                        // since the loop began (another queue's release) counts as written. One
+                        // whose newest value fails the wait is not drained for: draining writes
+                        // that value, and the wait fails again (~500 drains per 5 s, 98% for
+                        // nothing, ~19% of this thread once the label read faults were gone).
+                        u32 pending_value;
+                        const bool pending = memory_wait &&
+                                             !Gow3Toggle::Disabled(Gow3Toggle::PendingFenceWaits) &&
+                                             PendingFenceValue(wait_reg_mem->Address<VAddr>(),
+                                                               pending_value);
+                        if (pending && wait_reg_mem->TestValue(pending_value)) {
+                            break;
+                        }
                         if (rasterizer && !rasterizer->DrawPipeIdle() &&
                             (drain_all || !memory_wait ||
-                             HasPendingWrite(wait_reg_mem->Address<VAddr>()) ||
-                             rasterizer->GetBufferCache().HasDeferredSignals())) {
+                             (Gow3Toggle::Disabled(Gow3Toggle::PendingFenceWaits) &&
+                              HasPendingWrite(wait_reg_mem->Address<VAddr>())))) {
                             rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                             NoteComputeWaitDrain(*wait_reg_mem, wait_reg_mem->Test(regs.reg_array));
                             continue;

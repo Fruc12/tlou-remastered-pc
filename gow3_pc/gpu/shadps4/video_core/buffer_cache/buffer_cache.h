@@ -807,11 +807,24 @@ public:
     /// Waits for the readbacks up to `tick` and lands them (their deferred fences are written).
     void LandReadbacks(u64 tick);
     /// A fence label still waiting for a readback: later fences to it wait behind it.
+    /// gow3 25 Oct 2026: a memory wait's label (AmdGpu::g_read_wait_label). On a page a readback
+    /// read-protects, a label holding no GPU data (fences, WRITE_DATA: the runtime writes them
+    /// into guest memory) is read through the backing view: the compute queues' labels share
+    /// pages with the physics results, and each read faulted and drained the draw recording
+    /// thread (225 per 5 s, ~0.9 s). GPU data still takes the read fault (its download).
+    [[nodiscard]] u32 ReadWaitLabel(VAddr address) const;
     [[nodiscard]] bool IsLabelDeferred(VAddr label) const {
+        std::scoped_lock lock{deferred_mutex};
         return deferred_labels.contains(label);
     }
     [[nodiscard]] bool HasDeferredSignals() const {
         return deferred_signals.load(std::memory_order_acquire) != 0;
+    }
+    /// gow3 25 Oct 2026: whether a deferred fence may cover the dword at `address` (a counting
+    /// filter kept with deferred_labels, read without draining the draw recording thread; false
+    /// means none does).
+    [[nodiscard]] bool MayBeLabelDeferred(VAddr address) const {
+        return deferred_label_filter[LabelSlot(address)].load(std::memory_order_acquire) != 0;
     }
     /// The newest pending readback is in the command buffer still being recorded: fences waiting
     /// for it would wait forever if the guest waits for them before submitting more work.
@@ -820,6 +833,13 @@ public:
     void PollReadbacksNow();
 
 private:
+    static size_t LabelSlot(VAddr address) {
+        return static_cast<size_t>(((address >> 2) * 0x9E3779B97F4A7C15ull) >> 56);
+    }
+    std::array<std::atomic<u32>, 256> deferred_label_filter{};
+    /// gow3 25 Oct 2026: guards deferred_labels and deferred_values (looked up by the GPU command
+    /// thread's waits without draining the draw recording thread).
+    mutable std::mutex deferred_mutex;
     std::unordered_multiset<VAddr> deferred_labels;
     struct DeferredValue {
         u64 value;

@@ -103,8 +103,15 @@ public:
     void ScopedMarkerInsertColor(const std::string_view& str, const u32 color,
                                  bool from_guest = false);
 
-    void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
-    void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
+    /// gow3 25 Oct 2026: `order_guest_writes` (DMA packets): a path that writes guest memory at
+    /// once (the CPU copy or fill, WriteThrough) first waits for the copies and fences deferred to
+    /// the recording thread, in order with them; the GPU path writes no guest memory and does not
+    /// wait (RunDmaData waited for every packet: 28.6% of the draw recording thread, with the
+    /// counters' DMA copies on the GPU path).
+    void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds,
+                    bool order_guest_writes = false);
+    void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds,
+                    bool order_guest_writes = false);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
     /// GPU thread, before a write the guest can observe (see Scheduler::WaitHostCopies).

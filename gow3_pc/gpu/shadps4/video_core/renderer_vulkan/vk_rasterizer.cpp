@@ -823,7 +823,21 @@ bool Copy64EopReadback() {
 /// broke textures, and reading back every buffer these shaders write froze the game (up to 9 MiB,
 /// and pages the CPU uses). GOW3_EOP_READBACK_SHADERS=<hex>[:<slot>],...: other bindings in place
 /// of these two (without a slot: every written binding of up to 64 KiB).
+static const std::vector<std::pair<u64, u32>>& TlouEopReadbackList();
 static bool TlouEopReadbackBinding(u64 hash, u32 slot) {
+    return std::ranges::any_of(TlouEopReadbackList(), [hash, slot](const auto& b) {
+        return b.first == hash && (b.second == ~0u || b.second == slot);
+    });
+}
+
+/// gow3 24 Oct 2026: a shader one of whose outputs the game reads (any of its bindings): pages
+/// it writes are not shared with the CPU (BufferCache::NoteResultPages).
+static bool TlouResultShader(u64 hash) {
+    return std::ranges::any_of(TlouEopReadbackList(),
+                               [hash](const auto& b) { return b.first == hash; });
+}
+
+static const std::vector<std::pair<u64, u32>>& TlouEopReadbackList() {
     static const std::vector<std::pair<u64, u32>> bindings = [] {
         std::vector<std::pair<u64, u32>> list{{0x106beafd, 6}, {0xe30509e8, 5}};
         if (const char* env = std::getenv("GOW3_EOP_READBACK_SHADERS")) {
@@ -844,9 +858,7 @@ static bool TlouEopReadbackBinding(u64 hash, u32 slot) {
         }
         return list;
     }();
-    return std::ranges::any_of(bindings, [hash, slot](const auto& b) {
-        return b.first == hash && (b.second == ~0u || b.second == slot);
-    });
+    return bindings;
 }
 
 bool IsEopReadbackShader(u64 hash) {
@@ -3177,6 +3189,7 @@ void Rasterizer::OnSubmit() {
     DrainDrawPipe();
     buffer_cache.ReclaimArenaMemory();
     buffer_cache.PollPeeks();
+    buffer_cache.RunShareChecks();
     memory->CheckCopiedSources();
     CheckSrtWalks();
     CheckScalarCopySources();
@@ -3497,8 +3510,23 @@ void Rasterizer::SyncSmallGpuWrites() {
             buffer_cache.DownloadRangesAsync(shared);
         }
     }
+    // gow3 24 Oct 2026 (GOW3_SHARE_UNFINISHED_WRITES): pages shared instead of waiting for a
+    // running GPU write: their GPU bytes come back after this submission, asynchronously.
+    if (auto unfinished = buffer_cache.TakeUnfinishedSharedReadbacks(); !unfinished.empty()) {
+        std::ranges::sort(unfinished);
+        unfinished.erase(std::unique(unfinished.begin(), unfinished.end()), unfinished.end());
+        if (sync_gpu_constants) {
+            small_gpu_writes.insert(small_gpu_writes.end(), unfinished.begin(), unfinished.end());
+        } else {
+            buffer_cache.DownloadRangesAsync(unfinished);
+        }
+    }
+    // Without the constants sync nothing reads small_gpu_writes back (they piled up, ~5,000
+    // after a few minutes).
     for (const auto& range : buffer_cache.TakeSharedReadbacks()) {
-        small_gpu_writes.push_back(range);
+        if (sync_gpu_constants) {
+            small_gpu_writes.push_back(range);
+        }
     }
     if (!sync_gpu_constants || small_gpu_writes.empty()) {
         return;
@@ -5302,6 +5330,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     Gow3WatchRange::Note("storage", stage.pgm_hash, binding.buffer,
                                          vsharp.base_address, size);
                     VideoCore::NoteGpuWriter(vsharp.base_address, size, stage.pgm_hash);
+                    VideoCore::NoteRecentGpuWrite(vsharp.base_address, size,
+                                                  (u64(stage.pgm_hash) << 8) | (binding.buffer & 0xff));
+                    if (VideoCore::BufferCache::ShareUnfinishedWrites() &&
+                        TlouResultShader(stage.pgm_hash)) {
+                        buffer_cache.NoteResultPages(vsharp.base_address, size);
+                    }
                     // gow3 24 Oct 2026 diagnostics: The Last of Us's result bindings left without
                     // a readback (too large, or past the 256 ranges an event holds), every 5 s.
                     if (TlouEopReadbackBinding(stage.pgm_hash, binding.buffer)) {
@@ -6582,6 +6616,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
     DrainDrawPipe();
     if (!is_gds) {
         Gow3WatchRange::Note("fill", value, 0, address, num_bytes);
+        VideoCore::NoteRecentGpuWrite(address, num_bytes, VideoCore::GpuWriterFill);
     }
     ASSERT_MSG(address % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer address and size must be a multiple of 4 bytes");
@@ -6624,6 +6659,14 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
                                  ? "dma copy (gpu path)"
                                  : "dma copy",
                              src, 0, dst, num_bytes);
+    }
+    if (!dst_gds) {
+        VideoCore::NoteRecentGpuWrite(dst, num_bytes, VideoCore::GpuWriterDmaCopy);
+        // gow3 24 Oct 2026: small DMA copies are results the game reads (counters copied next
+        // to its own data: NPCs walked oddly with their pages shared), so those pages wait.
+        if (VideoCore::BufferCache::ShareUnfinishedWrites()) {
+            buffer_cache.NoteResultPages(dst, num_bytes);
+        }
     }
     if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&

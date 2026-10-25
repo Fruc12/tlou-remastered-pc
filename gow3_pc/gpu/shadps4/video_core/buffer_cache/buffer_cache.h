@@ -5,7 +5,9 @@
 
 #include <shared_mutex>
 
+#include <chrono>
 #include <format>
+#include <mutex>
 #include <string>
 
 #include "gow3_copy.h"
@@ -79,6 +81,11 @@ using SnapshotBytes = std::vector<u8, UninitAllocator<u8>>;
 /// gow3 diagnostics (GOW3_FAULT_STATS=1 GOW3_READ_SOURCES=1): records which shader wrote GPU data into each 1 MiB
 /// window, listed with the windows the CPU reads GPU data from.
 void NoteGpuWriter(VAddr address, u64 size, u64 shader_hash);
+/// gow3 diagnostics (GOW3_FAULT_STATS=1): a GPU write, for naming the writer of the GPU bytes a
+/// CPU write waits beside. `writer`: (shader hash << 8) | binding slot, or one of these.
+inline constexpr u64 GpuWriterDmaCopy = ~0ull - 1;
+inline constexpr u64 GpuWriterFill = ~0ull - 2;
+void NoteRecentGpuWrite(VAddr address, u64 size, u64 writer);
 /// gow3 diagnostics (GOW3_READBACK_STATS=1): why a range joins the per-submission readback
 /// (ReadbackKind bits), shown per 1 MiB window with the readback bytes every 5 s.
 enum ReadbackKind : u32 {
@@ -573,7 +580,37 @@ private:
         /// holds their guest copy from that write too: a 64-byte line whose GPU bytes the CPU
         /// overwrote later is the CPU's (readback guard; GOW3_READBACK_GUARD=0: the GPU wins).
         bool gpu_wins = false;
+        /// gow3 24 Oct 2026 (GOW3_SHARE_UNFINISHED_WRITES): the tracked bytes' guest copy was
+        /// replaced by PoisonByte() when the page was shared, and `bytes` holds that pattern:
+        /// a game write into them shows as a change even when it writes the value the stale
+        /// copy had. Decided per aligned 4-byte group, not per 64-byte line.
+        bool poisoned = false;
+        /// The guest bytes the poison replaced (valid for the poisoned tracked bytes): put back
+        /// where a path gives tracked bytes to the CPU without their GPU data (RestorePoison).
+        std::array<u8, LAZY_PAGE_SIZE> original{};
     };
+    /// gow3 24 Oct 2026: the poisoned bytes of [lo, hi) the game left alone get their guest
+    /// bytes from before the poison back; the range stops being tracked.
+    void RestorePoison(VAddr lo, VAddr hi);
+    /// The pattern a poisoned page's GPU bytes hold in guest memory until their data lands.
+    static u8 PoisonByte(size_t offset) {
+        const u32 word = (u32(offset >> 2) * 0x9E3779B1u) ^ 0xC3A5E15Bu;
+        return static_cast<u8>(word >> ((offset & 3) * 8));
+    }
+    /// gow3 24 Oct 2026: a GPU write into a poisoned page the guest cannot write (just uploaded):
+    /// the page leaves the shared state (its untouched GPU bytes stay GPU data, as usual).
+    void ResolvePoisonedPages(VAddr address, u64 size);
+    /// gow3 24 Oct 2026: pages holding output of the shaders whose results the game reads (the
+    /// physics ones, Rasterizer: TlouResultShader) or of DMA copies, noted in the last 10 s:
+    /// never shared, the game reads their GPU bytes.
+    std::mutex result_pages_mutex;
+    std::unordered_map<u64, std::chrono::steady_clock::time_point> result_pages;
+    bool IsResultPage(VAddr page);
+
+public:
+    void NoteResultPages(VAddr address, u64 size);
+
+private:
     /// gow3: the GPU writes into each 4 KiB page (writes up to 1 MiB): byte range and tick.
     struct PageWrite {
         u16 lo, hi;
@@ -588,6 +625,9 @@ private:
     bool GpuBytesInFlight(VAddr page);
     /// Pages shared with the CPU whose GPU bytes the next readback must bring back.
     std::vector<std::pair<VAddr, u64>> shared_readbacks;
+    /// Pages shared because their fetch would have waited for a running GPU write
+    /// (GOW3_SHARE_UNFINISHED_WRITES): read back asynchronously after the submission.
+    std::vector<std::pair<VAddr, u64>> unfinished_shared_readbacks;
     u64 g_shared_writes_count = 0;
 
 public:
@@ -595,10 +635,43 @@ public:
     std::vector<std::pair<VAddr, u64>> TakeSharedReadbacks() {
         return std::exchange(shared_readbacks, {});
     }
+    std::vector<std::pair<VAddr, u64>> TakeUnfinishedSharedReadbacks() {
+        return std::exchange(unfinished_shared_readbacks, {});
+    }
     /// gow3 22 Oct 2026 (GOW3_SHARED_FINISHED_WRITES=1): a CPU write beside final GPU bytes of
     /// its page takes the shared path too (no copy back first); the rasterizer then reads back
     /// the shared pages' GPU bytes at the end of each submission.
     static bool SharedFinishedWrites();
+    /// gow3 24 Oct 2026 (GOW3_SHARE_UNFINISHED_WRITES=1, off by default; tools/probe_tlou.py
+    /// turns it on): a CPU write beside
+    /// GPU bytes of its page whose GPU write is still running goes ahead on a shared page
+    /// instead of waiting for that write (GOW3_FETCH_NO_BLOCK).
+    static bool ShareUnfinishedWrites();
+    /// gow3 24 Oct 2026 diagnostics (GOW3_SHARE_CHECK=1): the pages those write faults waited
+    /// for or shared, checked once clean again (no pending upload, readback or shared record):
+    /// the GPU's copy of their CPU-owned bytes against guest memory (Rasterizer::OnSubmit).
+    void RunShareChecks();
+
+private:
+    struct ShareCheck {
+        VAddr page = 0;
+        std::chrono::steady_clock::time_point since{};
+        u32 kind = 0;     ///< 0: waited for the GPU write and fetched, 1: shared
+        u64 writer = 0;   ///< newest recorded writer of its GPU bytes (GOW3_FAULT_STATS)
+        u64 tick = 0;     ///< once the GPU copy is queued
+        Buffer* buffer = nullptr;
+        u64 offset = 0;
+        u64 staging_size = 0;
+        u8* mapped = nullptr;
+        std::vector<u8> guest;     ///< guest page when the copy was queued
+        std::bitset<4096> gpu_owned; ///< its GPU-written bytes then (not compared)
+    };
+    void NoteShareCheck(VAddr page, u32 kind);
+    std::mutex share_checks_mutex;
+    std::deque<ShareCheck> share_checks;        ///< waiting until the page is clean
+    std::deque<ShareCheck> share_checks_queued; ///< GPU copy queued
+
+public:
 
 private:
     std::map<VAddr, std::unique_ptr<LazyPage>> lazy_pages;

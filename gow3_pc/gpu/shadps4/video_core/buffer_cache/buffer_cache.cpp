@@ -227,6 +227,74 @@ void NoteGpuWriter(VAddr address, u64 size, u64 shader_hash) {
     }
 }
 
+// gow3 24 Oct 2026 diagnostics (GOW3_FAULT_STATS=1): the most recent GPU writes (a shader's
+// written binding, a DMA copy or fill), to name the writer of the GPU bytes a CPU write waits
+// beside (GOW3_FETCH_NO_BLOCK deferrals).
+struct RecentGpuWrite {
+    VAddr address;
+    u64 size;
+    u64 writer;
+};
+static constexpr size_t RecentGpuWrites = 65536;
+static std::mutex g_recent_writes_mutex;
+static std::vector<RecentGpuWrite> g_recent_writes;
+static u64 g_recent_writes_next = 0;
+static bool RecentWritesEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_FAULT_STATS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+void NoteRecentGpuWrite(VAddr address, u64 size, u64 writer) {
+    if (!RecentWritesEnabled() || size == 0) {
+        return;
+    }
+    std::scoped_lock lock{g_recent_writes_mutex};
+    if (g_recent_writes.empty()) {
+        g_recent_writes.resize(RecentGpuWrites);
+    }
+    g_recent_writes[g_recent_writes_next++ % RecentGpuWrites] = {address, size, writer};
+}
+
+/// The newest recorded write into [lo, hi), with its size; writer ~0: none recorded.
+static RecentGpuWrite NewestGpuWriteInto(VAddr lo, VAddr hi) {
+    std::scoped_lock lock{g_recent_writes_mutex};
+    const u64 count = std::min<u64>(g_recent_writes_next, g_recent_writes.size());
+    for (u64 i = 1; i <= count; ++i) {
+        const auto& write = g_recent_writes[(g_recent_writes_next - i) % RecentGpuWrites];
+        if (write.address < hi && lo < write.address + write.size) {
+            return write;
+        }
+    }
+    return {0, 0, ~0ull};
+}
+
+static std::string GpuWriterName(u64 writer) {
+    if (writer == ~0ull) {
+        return "none recorded";
+    }
+    if (writer == GpuWriterDmaCopy) {
+        return "DMA copy";
+    }
+    if (writer == GpuWriterFill) {
+        return "DMA fill";
+    }
+    return fmt::format("{:08x}:{}", writer >> 8, writer & 0xff);
+}
+
+struct WaitWriter {
+    u32 waits = 0;
+    VAddr example = 0;
+    u64 example_size = 0;
+    VAddr write_address = 0;
+    u64 write_size = 0;
+};
+static std::mutex g_wait_writers_mutex;
+static std::map<u64, WaitWriter> g_wait_writers; ///< writer -> waits beside its GPU bytes
+static std::atomic<u32> g_wait_tick_window{0}, g_wait_tick_page{0};
+
 /// "; written by <shader>x<writes> ..." for the statistics, empty unless GOW3_READ_SOURCES=1.
 static std::string WindowWriters(u64 window) {
     if (!FaultStatsEnabled()) {
@@ -798,6 +866,55 @@ static std::atomic<u32> g_old_byte_fetches{0};
 static std::array<std::atomic<u32>, 4> g_fetch_refused{}; // lazy, readback, no tick, open buffer
 // gow3 21 Oct 2026 (GOW3_FETCH_NO_BLOCK=1): fetches a guest thread waited for itself.
 static std::atomic<u32> g_fetch_deferrals{0};
+// gow3 24 Oct 2026 (GOW3_SHARE_UNFINISHED_WRITES): writes beside running GPU writes, shared;
+// such writes on physics result pages (waited for); poisoned pages a GPU write took back (or
+// could not: the page was CPU-writable).
+static std::atomic<u32> g_shared_unfinished_writes{0};
+static std::atomic<u32> g_result_page_waits{0}, g_poison_resolved{0}, g_poison_writable{0};
+static std::atomic<u32> g_poison_restored{0}; // RestorePoison: pages given their stale bytes back
+// gow3 24 Oct 2026 diagnostics (GOW3_SHARE_CHECK=1): the last operations on each poisoned page,
+// printed with the share check's poison examples.
+static bool ShareCheckEnabled();
+static std::mutex g_poison_history_mutex;
+static std::unordered_map<u64, std::deque<std::string>> g_poison_history;
+static void NotePoisonEvent(VAddr page, std::string event) {
+    if (!ShareCheckEnabled()) {
+        return;
+    }
+    std::scoped_lock lock{g_poison_history_mutex};
+    if (g_poison_history.size() > 8192) {
+        g_poison_history.clear();
+    }
+    auto& history = g_poison_history[page >> 12];
+    if (history.size() >= 12) {
+        history.pop_front();
+    }
+    history.push_back(std::move(event));
+}
+static std::string PoisonHistory(VAddr page) {
+    std::scoped_lock lock{g_poison_history_mutex};
+    std::string out;
+    if (const auto it = g_poison_history.find(page >> 12); it != g_poison_history.end()) {
+        for (const auto& event : it->second) {
+            out += ' ';
+            out += event;
+        }
+    }
+    return out;
+}
+bool BufferCache::ShareUnfinishedWrites() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_SHARE_UNFINISHED_WRITES");
+        const bool enabled = env && env[0] == '1';
+        if (enabled) {
+            std::printf("GPU: CPU writes beside GPU writes still running go ahead, the page's GPU "
+                        "bytes read back after the submission (GOW3_SHARE_UNFINISHED_WRITES=1)\n");
+            std::fflush(stdout);
+        }
+        return enabled;
+    }();
+    return on;
+}
 static bool UrgentCopiesEnabled(); // GOW3_URGENT_COPIES, defined with SideQueueFetch
 
 static bool LazyWritesEnabled() {
@@ -877,10 +994,45 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                             "tick %u, written in the open command buffer %u\n",
                             g_fetch_refused[0].exchange(0), g_fetch_refused[1].exchange(0),
                             g_fetch_refused[2].exchange(0), g_fetch_refused[3].exchange(0));
-                if (const u32 deferrals = g_fetch_deferrals.exchange(0)) {
+                const u32 deferrals = g_fetch_deferrals.exchange(0);
+                const u32 shared_unfinished = g_shared_unfinished_writes.exchange(0);
+                if (deferrals || shared_unfinished) {
                     std::printf("  write fetches waited for on the faulting thread: %u "
-                                "(GOW3_FETCH_NO_BLOCK)\n",
-                                deferrals);
+                                "(GOW3_FETCH_NO_BLOCK); writes beside running GPU writes that "
+                                "went ahead: %u (GOW3_SHARE_UNFINISHED_WRITES; physics and DMA "
+                                "copy pages waited: %u; shared pages a GPU write took back: %u, %u of them "
+                                "CPU-writable; given their stale bytes back: %u)\n",
+                                deferrals, shared_unfinished, g_result_page_waits.exchange(0),
+                                g_poison_resolved.exchange(0), g_poison_writable.exchange(0),
+                                g_poison_restored.exchange(0));
+                }
+                {
+                    std::map<u64, WaitWriter> writers;
+                    {
+                        std::scoped_lock lock{g_wait_writers_mutex};
+                        writers.swap(g_wait_writers);
+                    }
+                    const u32 page_ticks = g_wait_tick_page.exchange(0);
+                    const u32 window_ticks = g_wait_tick_window.exchange(0);
+                    if (page_ticks || window_ticks) {
+                        std::vector<std::pair<u32, u64>> sorted_writers;
+                        for (const auto& [writer, entry] : writers) {
+                            sorted_writers.emplace_back(entry.waits, writer);
+                        }
+                        std::ranges::sort(sorted_writers, std::greater{});
+                        std::string list;
+                        for (size_t i = 0; i < std::min<size_t>(sorted_writers.size(), 8); ++i) {
+                            const auto& entry = writers[sorted_writers[i].second];
+                            list += fmt::format(" {} x{} ({:#x}+{}, written as {:#x}+{});",
+                                                GpuWriterName(sorted_writers[i].second),
+                                                entry.waits, entry.example, entry.example_size,
+                                                entry.write_address, entry.write_size);
+                        }
+                        std::printf("  those waits: %u for a GPU write into their page, %u for a "
+                                    "large one elsewhere in its 1 MiB window; GPU-written ranges "
+                                    "beside them by newest writer:%s\n",
+                                    page_ticks, window_ticks, list.c_str());
+                    }
                 }
                 std::printf("  tracking: %zu lazy/shared pages, %zu pending readbacks, %zu pages with "
                             "GPU write records, %zu GPU-written ranges\n",
@@ -1088,6 +1240,10 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                         }
                         const VAddr lo = std::max(piece, pages_lo);
                         const VAddr hi = std::min(piece + piece_size, pages_hi);
+                        // A poisoned shared page's bytes go back to the guest's stale ones, as
+                        // without the poison (it was uploaded to the GPU from the game's bytes,
+                        // 88 dwords at a time, GOW3_SHARE_CHECK).
+                        RestorePoison(lo, hi);
                         readback.rewritten.Add(lo, hi - lo);
                         GpuRangesSubtract(lo, hi - lo);
                         ++g_readback_yields;
@@ -1135,28 +1291,87 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // The page becomes the CPU's and the GPU's: its GPU bytes stay the GPU's (uploads skip
             // them) until a readback brings them, and the guest copy of those bytes is kept so the
             // readback guard can tell the CPU's later writes into them.
-            const auto share_page = [&] {
+            const auto share_page = [&](std::vector<std::pair<VAddr, u64>>& readbacks) {
                 auto& slot = lazy_pages[page];
                 if (!slot) {
                     slot = std::make_unique<LazyPage>();
                 }
                 slot->gpu_wins = true;
                 std::array<u8, LAZY_PAGE_SIZE> guest;
-                if (!memory->TryReadBacking(page, guest.data(), LAZY_PAGE_SIZE)) {
+                const bool backed = memory->TryReadBacking(page, guest.data(), LAZY_PAGE_SIZE);
+                if (!backed) {
                     memory->CopySparseMemory(page, guest.data(), LAZY_PAGE_SIZE);
                 }
+                // gow3 24 Oct 2026: a poisoned page (share_poisoned) poisons its new GPU bytes
+                // too (this write fault: the guest cannot write the page meanwhile).
+                std::array<u8, LAZY_PAGE_SIZE> poisoned = guest;
+                bool poison_new = false;
+                if (slot->poisoned && backed) {
+                    gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
+                        for (VAddr byte = lo; byte < hi; ++byte) {
+                            if (!slot->tracked.test(byte - page)) {
+                                poisoned[byte - page] = PoisonByte(byte - page);
+                                poison_new = true;
+                            }
+                        }
+                    });
+                    poison_new = poison_new && memory->TryWriteBacking(std::bit_cast<u8*>(page),
+                                                                       poisoned.data(), LAZY_PAGE_SIZE);
+                }
+                if (poison_new) {
+                    NotePoisonEvent(page, "extend");
+                }
+                const auto& reference = poison_new ? poisoned : guest;
                 gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
                     for (VAddr byte = lo; byte < hi; ++byte) {
                         if (!slot->tracked.test(byte - page)) {
                             slot->tracked.set(byte - page);
-                            slot->bytes[byte - page] = guest[byte - page];
+                            slot->original[byte - page] = guest[byte - page];
+                            slot->bytes[byte - page] = reference[byte - page];
                         }
                     }
                 });
-                shared_readbacks.emplace_back(page, 4096);
+                readbacks.emplace_back(page, 4096);
                 NoteReadbackKind(page, 4096, ReadbackSharedPage);
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                 ++g_shared_writes_count;
+            };
+            // gow3 24 Oct 2026 (GOW3_SHARE_UNFINISHED_WRITES): share_page with the GPU bytes'
+            // guest copy poisoned (LazyPage::poisoned), so that the game's later writes into them
+            // are seen whatever value they write. Only for a page no record or readback holds
+            // (FetchableWindowTick refused those before this is reached), while the guest cannot
+            // write it (this fault), in one write through the backing view.
+            const auto share_poisoned = [&] {
+                if (lazy_pages.contains(page)) {
+                    return false;
+                }
+                std::array<u8, LAZY_PAGE_SIZE> contents;
+                if (!memory->TryReadBacking(page, contents.data(), LAZY_PAGE_SIZE)) {
+                    return false;
+                }
+                auto record = std::make_unique<LazyPage>();
+                record->gpu_wins = true;
+                record->poisoned = true;
+                gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
+                    for (VAddr byte = lo; byte < hi; ++byte) {
+                        const size_t i = byte - page;
+                        record->tracked.set(i);
+                        record->original[i] = contents[i];
+                        record->bytes[i] = PoisonByte(i);
+                        contents[i] = record->bytes[i];
+                    }
+                });
+                if (!memory->TryWriteBacking(std::bit_cast<u8*>(page), contents.data(),
+                                             LAZY_PAGE_SIZE)) {
+                    return false;
+                }
+                NotePoisonEvent(page, fmt::format("share{}", record->tracked.count()));
+                lazy_pages[page] = std::move(record);
+                unfinished_shared_readbacks.emplace_back(page, 4096);
+                NoteReadbackKind(page, 4096, ReadbackSharedPage);
+                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                ++g_shared_writes_count;
+                return true;
             };
             // gow3 22 Oct 2026 (GOW3_SHARED_FINISHED_WRITES=1): a write beside the page's GPU bytes
             // (false sharing: 761-930 of 910-1,039 CPU writes into GPU data per 5 s in Sarah's
@@ -1167,7 +1382,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // bytes, at the end of the submission (Rasterizer::SyncSmallGpuWrites), brings them.
             if (SharedFinishedWrites() && shared_writes &&
                 !gpu_modified_ranges.Intersects(device_addr, size)) {
-                share_page();
+                share_page(shared_readbacks);
                 g_shared_finished_writes.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -1245,8 +1460,66 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     if (!semaphore->IsFree(tick)) {
                         semaphore->Refresh();
                     }
+                    if (stats && !semaphore->IsFree(tick)) {
+                        // Diagnostics: the GPU write this fetch waits for, and the newest
+                        // recorded writer of each GPU-written range in the page.
+                        u64 page_tick = 0;
+                        {
+                            std::shared_lock lock{gpu_ranges_mutex};
+                            if (const auto it = gpu_write_page_tick.find(page >> 12);
+                                it != gpu_write_page_tick.end()) {
+                                page_tick = it->second;
+                            }
+                        }
+                        ++(page_tick == tick ? g_wait_tick_page : g_wait_tick_window);
+                        std::scoped_lock lock{g_wait_writers_mutex};
+                        gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
+                            const auto write = NewestGpuWriteInto(lo, hi);
+                            auto& entry = g_wait_writers[write.writer];
+                            if (entry.waits++ == 0) {
+                                entry.example = lo;
+                                entry.example_size = hi - lo;
+                                entry.write_address = write.address;
+                                entry.write_size = write.size;
+                            }
+                        });
+                    }
+                    // gow3 24 Oct 2026 (GOW3_SHARE_UNFINISHED_WRITES=1; off by default, on for The
+                    // Last of Us in tools/probe_tlou.py): a write beside
+                    // the page's GPU bytes (false sharing) waited here for the frame in flight:
+                    // in the Quarantine Zone (the player's profile) ~205 such writes per 5 s on
+                    // the game's job threads, ~37 ms each (85% of their write-fault time), into
+                    // per-frame rings where the GPU writes a few hundred bytes per page. The
+                    // write now goes ahead on a shared page (uploads skip its GPU bytes, the
+                    // readback guard keeps the game's later changes) and those GPU bytes come
+                    // back asynchronously after this submission (Rasterizer::SyncSmallGpuWrites),
+                    // recorded after the running write, so guest memory gets them as the fetch
+                    // gave them. Writes into the GPU bytes themselves still wait.
+                    // The player's session with it on: no such wait left, but NPCs moved
+                    // wrongly again. GOW3_SHARE_CHECK=1 then found a physics page (106beafd's)
+                    // whose game-written bytes the GPU never got: the game rewrote GPU bytes with
+                    // the value their stale guest copy already had, which the shared page's
+                    // compare cannot see, so uploads skipped them. Now those bytes are poisoned
+                    // in guest memory while shared (share_poisoned), and pages of the physics
+                    // shaders and of DMA copies (counters: with them shared the NPCs walked
+                    // oddly), whose GPU bytes the game reads, wait as before (IsResultPage).
+                    // Five player sessions later: no stale or poisoned game bytes left, NPCs
+                    // normal, frame time stddev ~15 -> ~10 ms. (The DMA page's differences the
+                    // check reports are on the waited path too: labels the runtime writes into
+                    // guest memory only.)
+                    if (!semaphore->IsFree(tick) && ShareUnfinishedWrites() && shared_writes &&
+                        !gpu_modified_ranges.Intersects(device_addr, size)) {
+                        if (IsResultPage(page)) {
+                            g_result_page_waits.fetch_add(1, std::memory_order_relaxed);
+                        } else if (share_poisoned()) {
+                            g_shared_unfinished_writes.fetch_add(1, std::memory_order_relaxed);
+                            NoteShareCheck(page, 1);
+                            return;
+                        }
+                    }
                     if (!semaphore->IsFree(tick)) {
                         deferred_tick = tick;
+                        NoteShareCheck(page, 0);
                         return;
                     }
                 }
@@ -1270,7 +1543,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             }
             if (shared_writes && !gpu_modified_ranges.Intersects(device_addr, size)) {
                 if (GpuBytesInFlight(page)) {
-                    share_page();
+                    share_page(shared_readbacks);
                     return;
                 }
             }
@@ -1649,8 +1922,38 @@ void BufferCache::ForEachLazyUploadPiece(VAddr address, u64 size, Func&& func) {
         // Records outside gpu_modified_ranges are stale (downloaded meanwhile): ignored.
         // Readback guard: decided per 64-byte line, shared pages too.
         const bool guard = ReadbackGuardEnabled();
-        const u64 granule = guard ? GuardLine : 1;
-        const bool compare = guard || !record.gpu_wins;
+        // Poisoned pages: per aligned 4-byte group (a 64-byte line would upload the poison of
+        // the GPU bytes the game left alone next to one it wrote).
+        const u64 granule = record.poisoned ? 4 : guard ? GuardLine : 1;
+        const bool compare = guard || !record.gpu_wins || record.poisoned;
+        if (record.poisoned) {
+            // Tracked bytes no longer GPU data that still hold the poison would be uploaded
+            // with it (the loop below only skips GPU data): their pre-poison bytes come back.
+            std::bitset<LAZY_PAGE_SIZE> gpu_owned;
+            gpu_modified_ranges.ForEachInRange(lo_limit, hi_limit - lo_limit, [&](VAddr a, VAddr b) {
+                for (VAddr byte = a; byte < b; ++byte) {
+                    gpu_owned.set(byte - page);
+                }
+            });
+            u32 stale = 0;
+            for (VAddr byte = lo_limit; byte < hi_limit; ++byte) {
+                const size_t i = byte - page;
+                if (record.tracked.test(i) && !gpu_owned.test(i)) {
+                    if (record.bytes[i] == PoisonByte(i) && guest[i] == PoisonByte(i)) {
+                        guest[i] = record.original[i];
+                        ++stale;
+                    }
+                    record.tracked.reset(i);
+                }
+            }
+            if (stale) {
+                memory->TryWriteBacking(std::bit_cast<u8*>(lo_limit), guest.data() + (lo_limit - page),
+                                        hi_limit - lo_limit);
+                g_poison_restored.fetch_add(1, std::memory_order_relaxed);
+                NotePoisonEvent(page, fmt::format("upload-stale{}", stale));
+            }
+        }
+        u32 poisoned_cpu = 0, poisoned_skip = 0;
         gpu_modified_ranges.ForEachInRange(lo_limit, hi_limit - lo_limit, [&](VAddr lo, VAddr hi) {
             for (VAddr line = lo; line < hi;) {
                 const VAddr line_end = std::min(Common::AlignDown(line, granule) + granule, hi);
@@ -1667,13 +1970,19 @@ void BufferCache::ForEachLazyUploadPiece(VAddr address, u64 size, Func&& func) {
                     if (cpu_line) {
                         record.tracked.reset(i);
                         add_run(cpu_wins, byte);
+                        ++poisoned_cpu;
                     } else {
                         add_run(skips, byte);
+                        ++poisoned_skip;
                     }
                 }
                 line = line_end;
             }
         });
+        if (record.poisoned) {
+            NotePoisonEvent(page, fmt::format("up{}/{}{}", poisoned_cpu, poisoned_skip,
+                                              record.tracked.none() ? "-gone" : ""));
+        }
         // The CPU overwrote these after the GPU: they are uploaded and stop being GPU data.
         for (const auto& [lo, hi] : cpu_wins) {
             GpuRangesSubtract(lo, hi - lo);
@@ -1710,6 +2019,67 @@ void BufferCache::WriteBackGpuData(VAddr address, const u8* data, u64 size,
         }
         const VAddr lo = std::max(page, address);
         const VAddr hi = std::min(page + LAZY_PAGE_SIZE, end);
+        if (record.poisoned) {
+            // gow3 24 Oct 2026: per aligned 4-byte group. A group the game wrote (some tracked
+            // byte no longer holds the poison) keeps its value (the page is CPU-modified, the
+            // next upload sends it); the others take the GPU's bytes, except those a newer GPU
+            // write covers (`rewritten`), which keep the poison and stay tracked.
+            if (lo > cursor) {
+                memory->TryWriteBacking(std::bit_cast<u8*>(cursor), data + (cursor - address),
+                                        lo - cursor);
+            }
+            // The bytes taking the GPU's value, written back in runs.
+            VAddr run = hi;
+            const auto flush_run = [&](VAddr to) {
+                if (run < to) {
+                    memory->TryWriteBacking(std::bit_cast<u8*>(run), data + (run - address), to - run);
+                }
+                run = hi;
+            };
+            u32 n_data = 0, n_cpu = 0, n_still = 0;
+            for (VAddr group = lo; group < hi;) {
+                const VAddr group_end = std::min(Common::AlignDown(group, 4) + 4, hi);
+                bool cpu_group = false;
+                for (VAddr byte = group; byte < group_end && !cpu_group; ++byte) {
+                    const size_t i = byte - page;
+                    cpu_group = record.tracked.test(i) && guest[i] != record.bytes[i];
+                }
+                for (VAddr byte = group; byte < group_end; ++byte) {
+                    const size_t i = byte - page;
+                    bool write = !record.tracked.test(i);
+                    if (!write) {
+                        const bool still_gpu = rewritten && rewritten->Contains(byte, 1);
+                        if (cpu_group) {
+                            ++g_lazy_cpu_wins;
+                            ++n_cpu;
+                            if (still_gpu) {
+                                record.bytes[i] = guest[i];
+                            } else {
+                                record.tracked.reset(i);
+                            }
+                        } else if (!still_gpu) {
+                            write = true;
+                            ++n_data;
+                            record.tracked.reset(i);
+                        } else {
+                            ++n_still;
+                        }
+                    }
+                    if (write) {
+                        run = std::min(run, byte);
+                    } else {
+                        flush_run(byte);
+                    }
+                }
+                group = group_end;
+            }
+            flush_run(hi);
+            NotePoisonEvent(page, fmt::format("{}{}/{}/{}{}", rewritten ? "land" : "down", n_data,
+                                              n_cpu, n_still, record.tracked.none() ? "-gone" : ""));
+            cursor = hi;
+            it = record.tracked.none() ? lazy_pages.erase(it) : std::next(it);
+            continue;
+        }
         // Readback guard: decided per 64-byte line, shared pages (gpu_wins) too. Without it,
         // per byte, and shared pages take the GPU's bytes unseen.
         const bool guard = ReadbackGuardEnabled();
@@ -1809,6 +2179,13 @@ void BufferCache::LandGuarded(PendingReadback& readback, size_t piece, VAddr lo,
         const VAddr line_end = std::min(Common::AlignDown(line, GuardLine) + GuardLine, hi);
         const u64 k = line - lo;
         const u64 m = line_end - line;
+        // A poisoned shared page decides per byte from its record (WriteBackGpuData): a line
+        // kept here would keep the poison of its GPU bytes the game did not write.
+        if (const auto lazy = lazy_pages.find(Common::AlignDown(line, LAZY_PAGE_SIZE));
+            lazy != lazy_pages.end() && lazy->second->poisoned) {
+            line = line_end;
+            continue;
+        }
         // Changed since the readback was queued, and not to the GPU's value: the game wrote it
         // after the GPU (its fence was out by then), so the game's value is the newer one.
         if (std::memcmp(pre.data() + k, before + k, m) != 0 &&
@@ -2148,6 +2525,313 @@ void BufferCache::PeekGpuBuffer(const Buffer* source, u64 offset, VAddr address,
                      address, size, tag, slot,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                      dispatch, phase});
+}
+
+void BufferCache::ResolvePoisonedPages(VAddr address, u64 size) {
+    if (lazy_pages.empty() || size == 0) {
+        return;
+    }
+    const VAddr end = address + size;
+    for (auto it = lazy_pages.lower_bound(Common::AlignDown(address, LAZY_PAGE_SIZE));
+         it != lazy_pages.end() && it->first < end; ++it) {
+        LazyPage& record = *it->second;
+        if (!record.poisoned) {
+            continue;
+        }
+        const VAddr page = it->first;
+        // A page the guest can still write keeps its record as it is (the new GPU bytes are
+        // not tracked: as on a shared page before); poisoning them could hide a write.
+        if (memory_tracker->IsRegionCpuModified(page, LAZY_PAGE_SIZE)) {
+            g_poison_writable.fetch_add(1, std::memory_order_relaxed);
+            NotePoisonEvent(page, "gpu-writable");
+            continue;
+        }
+        // Uploaded just now (the bytes the game wrote went with it) and write-protected: the
+        // new GPU bytes are poisoned too and the page's GPU bytes are read back after this
+        // submission. Dropping the record here (first version) left the poison it held as
+        // ordinary GPU data: a later share of the page (share_page, with a pending readback)
+        // took the poison for the guest's copy and its 64-byte lines kept it in the game's
+        // bytes (up to 1,760 dwords per 5 s, GOW3_SHARE_CHECK).
+        std::array<u8, LAZY_PAGE_SIZE> contents;
+        if (!memory->TryReadBacking(page, contents.data(), LAZY_PAGE_SIZE)) {
+            continue;
+        }
+        const VAddr lo = std::max(page, address);
+        const VAddr hi = std::min(page + LAZY_PAGE_SIZE, end);
+        bool added = false;
+        const std::array<u8, LAZY_PAGE_SIZE> before = contents;
+        for (VAddr byte = lo; byte < hi; ++byte) {
+            const size_t i = byte - page;
+            if (!record.tracked.test(i)) {
+                contents[i] = PoisonByte(i);
+                added = true;
+            }
+        }
+        if (added && memory->TryWriteBacking(std::bit_cast<u8*>(lo), contents.data() + (lo - page),
+                                             hi - lo)) {
+            for (VAddr byte = lo; byte < hi; ++byte) {
+                const size_t i = byte - page;
+                if (!record.tracked.test(i)) {
+                    record.tracked.set(i);
+                    record.original[i] = before[i];
+                    record.bytes[i] = contents[i];
+                }
+            }
+        }
+        // Also when the write only covers bytes it tracks already: an earlier readback lands
+        // them as rewritten (still poisoned), and only a later one brings them.
+        unfinished_shared_readbacks.emplace_back(page, 4096);
+        g_poison_resolved.fetch_add(1, std::memory_order_relaxed);
+        NotePoisonEvent(page, fmt::format("gpu{}", added ? "+" : ""));
+    }
+}
+
+void BufferCache::RestorePoison(VAddr lo, VAddr hi) {
+    if (lazy_pages.empty() || lo >= hi) {
+        return;
+    }
+    for (auto it = lazy_pages.lower_bound(Common::AlignDown(lo, LAZY_PAGE_SIZE));
+         it != lazy_pages.end() && it->first < hi;) {
+        LazyPage& record = *it->second;
+        if (!record.poisoned) {
+            ++it;
+            continue;
+        }
+        const VAddr page = it->first;
+        std::array<u8, LAZY_PAGE_SIZE> contents;
+        if (!memory->TryReadBacking(page, contents.data(), LAZY_PAGE_SIZE)) {
+            ++it;
+            continue;
+        }
+        const VAddr a = std::max(page, lo);
+        const VAddr b = std::min(page + LAZY_PAGE_SIZE, hi);
+        bool restored = false;
+        for (VAddr byte = a; byte < b; ++byte) {
+            const size_t i = byte - page;
+            if (!record.tracked.test(i)) {
+                continue;
+            }
+            if (record.bytes[i] == PoisonByte(i) && contents[i] == PoisonByte(i)) {
+                contents[i] = record.original[i];
+                restored = true;
+            }
+            record.tracked.reset(i);
+        }
+        if (restored) {
+            memory->TryWriteBacking(std::bit_cast<u8*>(a), contents.data() + (a - page), b - a);
+            g_poison_restored.fetch_add(1, std::memory_order_relaxed);
+        }
+        NotePoisonEvent(page, "drop");
+        it = record.tracked.none() ? lazy_pages.erase(it) : std::next(it);
+    }
+}
+
+bool BufferCache::IsResultPage(VAddr page) {
+    std::scoped_lock lock{result_pages_mutex};
+    const auto it = result_pages.find(page >> 12);
+    return it != result_pages.end() &&
+           std::chrono::steady_clock::now() - it->second < std::chrono::seconds{10};
+}
+
+void BufferCache::NoteResultPages(VAddr address, u64 size) {
+    if (size == 0 || size > 1_MB) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock{result_pages_mutex};
+    if (result_pages.size() > 32768) {
+        std::erase_if(result_pages, [&](const auto& entry) {
+            return now - entry.second >= std::chrono::seconds{10};
+        });
+    }
+    for (u64 page = address >> 12; page <= (address + size - 1) >> 12; ++page) {
+        result_pages[page] = now;
+    }
+}
+
+static bool ShareCheckEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_SHARE_CHECK");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+void BufferCache::NoteShareCheck(VAddr page, u32 kind) {
+    if (!ShareCheckEnabled()) {
+        return;
+    }
+    u64 writer = ~0ull;
+    gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
+        if (writer == ~0ull) {
+            writer = NewestGpuWriteInto(lo, hi).writer;
+        }
+    });
+    std::scoped_lock lock{share_checks_mutex};
+    if (share_checks.size() < 1024) {
+        share_checks.push_back({.page = page,
+                                .since = std::chrono::steady_clock::now(),
+                                .kind = kind,
+                                .writer = writer});
+    }
+}
+
+void BufferCache::RunShareChecks() {
+    if (!ShareCheckEnabled()) {
+        return;
+    }
+    struct Stats {
+        u32 checked = 0, bad_pages = 0, never_clean = 0, poison_left = 0;
+        u64 bad_bytes = 0;
+    };
+    static std::array<Stats, 2> stats{};
+    static std::map<std::pair<u32, u64>, u32> bad_by_writer;
+    static int printed = 0;
+    static auto last = std::chrono::steady_clock::now();
+    static const char* const kinds[] = {"waited", "shared"};
+    // Copies that have landed: the CPU-owned bytes the GPU holds against the guest's.
+    while (!share_checks_queued.empty() && scheduler.IsFree(share_checks_queued.front().tick)) {
+        ShareCheck& check = share_checks_queued.front();
+        check.buffer->Invalidate(check.offset, check.staging_size);
+        u32 bad = 0, first = 0, last_byte = 0;
+        for (u32 i = 0; i < 4096; ++i) {
+            if (!check.gpu_owned.test(i) && check.mapped[i] != check.guest[i]) {
+                if (bad++ == 0) {
+                    first = i;
+                }
+                last_byte = i;
+            }
+        }
+        auto& s = stats[check.kind];
+        ++s.checked;
+        // Poison left in the game's bytes (aligned 4-byte groups the GPU does not own).
+        u32 poison_dwords = 0, first_poison = 0, poison_on_gpu = 0;
+        for (u32 group = 0; group < 4096; group += 4) {
+            bool poison = true;
+            for (u32 i = group; i < group + 4 && poison; ++i) {
+                poison = !check.gpu_owned.test(i) && check.guest[i] == PoisonByte(i);
+            }
+            if (poison) {
+                if (poison_dwords++ == 0) {
+                    first_poison = group;
+                }
+                poison_on_gpu += std::memcmp(check.mapped + group, check.guest.data() + group, 4) == 0;
+            }
+        }
+        s.poison_left += poison_dwords;
+        static int poison_printed = 0;
+        if (poison_dwords && poison_printed < 16) {
+            ++poison_printed;
+            u32 gpu_owned = 0;
+            for (u32 i = 0; i < 4096; ++i) {
+                gpu_owned += check.gpu_owned.test(i);
+            }
+            std::printf("Share check: %s page %#llx (GPU bytes by %s, %u GPU-owned now): %u poison "
+                        "dwords in the game's bytes from %#x, %u of them on the GPU too; history:%s\n",
+                        kinds[check.kind], static_cast<unsigned long long>(check.page),
+                        GpuWriterName(check.writer).c_str(), gpu_owned, poison_dwords,
+                        first_poison, poison_on_gpu, PoisonHistory(check.page).c_str());
+            std::fflush(stdout);
+        }
+        if (bad) {
+            ++s.bad_pages;
+            s.bad_bytes += bad;
+            ++bad_by_writer[{check.kind, check.writer}];
+            if (printed < 24) {
+                ++printed;
+                std::printf("Share check: %s page %#llx (GPU bytes by %s): %u CPU-owned bytes differ "
+                            "on the GPU, offsets %#x-%#x, first guest %02x GPU %02x\n",
+                            kinds[check.kind], static_cast<unsigned long long>(check.page),
+                            GpuWriterName(check.writer).c_str(), bad, first, last_byte,
+                            check.guest[first], check.mapped[first]);
+                std::fflush(stdout);
+            }
+        }
+        staging_pool.FreeDeferred(Vulkan::StagingBufferRef{
+            .buffer = check.buffer,
+            .offset = check.offset,
+            .size = check.staging_size,
+            .mapped = check.mapped,
+            .type = VideoCore::MemoryType::HostCached,
+        });
+        share_checks_queued.pop_front();
+    }
+    // Pages due (200 ms after the fault) and clean: their GPU copy is queued now, with the guest
+    // page as it is (write-protected while clean, so the GPU copy must match it).
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<ShareCheck> due;
+    {
+        std::scoped_lock lock{share_checks_mutex};
+        while (!share_checks.empty() && due.size() < 32 &&
+               now - share_checks.front().since >= std::chrono::milliseconds{200}) {
+            due.push_back(std::move(share_checks.front()));
+            share_checks.pop_front();
+        }
+    }
+    std::vector<ShareCheck> again;
+    for (auto& check : due) {
+        const VAddr page = check.page;
+        if (now - check.since > std::chrono::seconds{3}) {
+            ++stats[check.kind].never_clean;
+            continue;
+        }
+        const u32 block = static_cast<u32>(page >> block_shift);
+        if (memory_tracker->IsRegionCpuModified(page, 4096) || lazy_pages.contains(page) ||
+            PendingReadbackTick(page, 4096, false) || !resident_ranges.Contains(block, block + 1)) {
+            again.push_back(std::move(check));
+            continue;
+        }
+        const auto* arena = GetArena(block, block);
+        if (!arena) {
+            continue;
+        }
+        const auto staging = staging_pool.Request(4096, VideoCore::MemoryType::HostCached, 0, true);
+        const vk::BufferCopy copy = {
+            .srcOffset = page - arena->cpu_addr,
+            .dstOffset = staging.offset,
+            .size = 4096,
+        };
+        runtime.CopyBuffer(arena, staging.buffer, std::span{&copy, 1});
+        check.guest.resize(4096);
+        if (!memory->TryReadBacking(page, check.guest.data(), 4096)) {
+            memory->CopySparseMemory(page, check.guest.data(), 4096);
+        }
+        gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
+            for (VAddr byte = lo; byte < hi; ++byte) {
+                check.gpu_owned.set(byte - page);
+            }
+        });
+        check.tick = scheduler.CurrentTick();
+        check.buffer = staging.buffer;
+        check.offset = staging.offset;
+        check.staging_size = staging.size;
+        check.mapped = staging.mapped;
+        share_checks_queued.push_back(std::move(check));
+    }
+    if (!again.empty()) {
+        std::scoped_lock lock{share_checks_mutex};
+        for (auto& check : again) {
+            share_checks.push_back(std::move(check));
+        }
+    }
+    if (now - last >= std::chrono::seconds{5}) {
+        last = now;
+        std::string writers;
+        for (const auto& [key, n] : bad_by_writer) {
+            writers += fmt::format(" {} {}x{}", kinds[key.first], GpuWriterName(key.second), n);
+        }
+        std::printf("Share check (5 s): waited pages %u checked, %u with CPU bytes stale on the GPU "
+                    "(%llu bytes), %u never clean; shared pages %u checked, %u stale (%llu bytes), %u "
+                    "never clean, %u poison dwords left in the game's bytes;%s\n",
+                    stats[0].checked, stats[0].bad_pages,
+                    static_cast<unsigned long long>(stats[0].bad_bytes), stats[0].never_clean,
+                    stats[1].checked, stats[1].bad_pages,
+                    static_cast<unsigned long long>(stats[1].bad_bytes), stats[1].never_clean,
+                    stats[1].poison_left, writers.c_str());
+        std::fflush(stdout);
+        stats = {};
+        bad_by_writer.clear();
+    }
 }
 
 void BufferCache::PollPeeks() {
@@ -3148,9 +3832,54 @@ void BufferCache::EraseLazyPages(VAddr address, u64 size) {
     if (lazy_pages.empty()) {
         return;
     }
-    const auto first = lazy_pages.lower_bound(Common::AlignDown(address, LAZY_PAGE_SIZE));
-    const auto last = lazy_pages.lower_bound(address + size);
-    lazy_pages.erase(first, last);
+    // gow3 24 Oct 2026: a poisoned page keeps its record while it tracks bytes outside the
+    // downloaded range: they still hold the poison (the resource table walk downloads a few
+    // dozen bytes of a page, Rasterizer::SyncSrtTables; erasing the whole record let a later
+    // share_page take that poison for the guest's copy and keep it in the game's bytes).
+    // Within the range, a tracked byte still GPU data (not downloaded: its tracker page was not
+    // GPU-modified) stays tracked; one that is not but still holds the poison gets its guest
+    // byte from before the poison back. No byte is left untracked with the poison in it.
+    const VAddr end = address + size;
+    for (auto it = lazy_pages.lower_bound(Common::AlignDown(address, LAZY_PAGE_SIZE));
+         it != lazy_pages.end() && it->first < end;) {
+        LazyPage& record = *it->second;
+        if (record.poisoned) {
+            const VAddr page = it->first;
+            const VAddr lo = std::max(page, address);
+            const VAddr hi = std::min(page + LAZY_PAGE_SIZE, end);
+            std::bitset<LAZY_PAGE_SIZE> gpu_owned;
+            gpu_modified_ranges.ForEachInRange(lo, hi - lo, [&](VAddr a, VAddr b) {
+                for (VAddr byte = a; byte < b; ++byte) {
+                    gpu_owned.set(byte - page);
+                }
+            });
+            std::array<u8, LAZY_PAGE_SIZE> contents;
+            const bool backed = memory->TryReadBacking(page, contents.data(), LAZY_PAGE_SIZE);
+            bool restored = false;
+            for (VAddr byte = lo; byte < hi; ++byte) {
+                const size_t i = byte - page;
+                if (!record.tracked.test(i) || gpu_owned.test(i)) {
+                    continue;
+                }
+                if (backed && record.bytes[i] == PoisonByte(i) && contents[i] == PoisonByte(i)) {
+                    contents[i] = record.original[i];
+                    restored = true;
+                }
+                record.tracked.reset(i);
+            }
+            if (restored) {
+                memory->TryWriteBacking(std::bit_cast<u8*>(lo), contents.data() + (lo - page), hi - lo);
+                g_poison_restored.fetch_add(1, std::memory_order_relaxed);
+            }
+            NotePoisonEvent(page, fmt::format("erase{}{}", restored ? "-restored" : "",
+                                              record.tracked.any() ? "-kept" : ""));
+            if (record.tracked.any()) {
+                ++it;
+                continue;
+            }
+        }
+        it = lazy_pages.erase(it);
+    }
 }
 
 namespace {
@@ -3501,6 +4230,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         for (auto& readback : pending_readbacks) {
             readback.NoteRewrite(device_addr, size);
         }
+        ResolvePoisonedPages(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
 }

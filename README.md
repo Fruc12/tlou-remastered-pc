@@ -19,9 +19,9 @@ prologue in Sarah's house, which renders correctly (lighting, skinned characters
   480 Hz vblank, capped at the display's rate; `GOW3_VBLANK_HZ=60` for the old 60 Hz pacing).
   `Start-TLOU-Profile.cmd` starts the game with the sampling profiler (reports in
   `analysis\tlou\profile-user`, read with `tools/profile_rank.py`).
-- **Known issues:** the HUD of the item inspection screen does not show; with the 60 Hz vblank
-  the characters' hair (Sarah's, Joel's) sometimes stretched (not seen with the default 480 Hz
-  one). A frame that compiles many new shaders can pause the game for
+- **Known issues:** the HUD of the item inspection screen does not show; the characters' hair
+  (Sarah's, Joel's) sometimes stretches, more often when frames are long or uneven. A frame that
+  compiles many new shaders can pause the game for
   a few seconds: the game's own frame watchdog stopped it after 2 s, and is now patched to 20 s
   (`TLOU_FIXES=none` leaves the game unpatched). If a load ever hangs, start with
   `GOW3_FRAMES_IN_FLIGHT=0` (slower).

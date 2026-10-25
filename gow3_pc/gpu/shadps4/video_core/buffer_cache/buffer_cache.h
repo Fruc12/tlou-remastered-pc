@@ -742,6 +742,20 @@ private:
     };
     PageManager* page_manager = nullptr;
     std::deque<PendingReadback> pending_readbacks;
+    /// gow3 25 Oct 2026: the 1 MiB windows the pieces of pending readbacks touch, with how many
+    /// readbacks touch each (kept with pending_readbacks). A write into none of them needs no
+    /// NoteRewrite pass over every pending readback: with hundreds pending (DMA counters, physics
+    /// results, shared pages) that pass, run for every written binding, was ~4% of the draw
+    /// recording thread.
+    std::map<u64, u32> pending_readback_windows;
+    void IndexReadbackWindows(const PendingReadback& readback, bool add);
+    [[nodiscard]] bool TouchesPendingReadback(VAddr address, u64 size) const {
+        if (pending_readback_windows.empty() || size == 0) {
+            return false;
+        }
+        const auto it = pending_readback_windows.lower_bound(address >> 20);
+        return it != pending_readback_windows.end() && it->first <= ((address + size - 1) >> 20);
+    }
     /// gow3 20 Oct 2026 (GOW3_READBACK_POOL): snapshot buffers of landed readbacks, reused by
     /// the next ones (DownloadRangesAsync); guarded like pending_readbacks.
     std::vector<SnapshotBytes> snapshot_pool;

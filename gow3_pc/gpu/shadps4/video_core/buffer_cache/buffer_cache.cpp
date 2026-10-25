@@ -1892,10 +1892,12 @@ u32 BufferCache::TakeLabelsInReadbacks() {
 
 void BufferCache::NoteCpuWrite(VAddr address, u64 size) {
     bool inside = false;
-    for (auto& readback : pending_readbacks) {
-        readback.NoteRewrite(address, size);
-        for (const auto& [lo, n] : readback.pieces) {
-            inside |= address < lo + n && lo < address + size;
+    if (TouchesPendingReadback(address, size)) {
+        for (auto& readback : pending_readbacks) {
+            readback.NoteRewrite(address, size);
+            for (const auto& [lo, n] : readback.pieces) {
+                inside |= address < lo + n && lo < address + size;
+            }
         }
     }
     if (inside) {
@@ -1944,8 +1946,10 @@ bool BufferCache::WriteThrough(VAddr address, const void* data, u64 size) {
             }
         }
     }
-    for (auto& readback : pending_readbacks) {
-        readback.NoteRewrite(address, size);
+    if (TouchesPendingReadback(address, size)) {
+        for (auto& readback : pending_readbacks) {
+            readback.NoteRewrite(address, size);
+        }
     }
     return true;
 }
@@ -2566,9 +2570,33 @@ void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ran
             std::fflush(stdout);
         }
     }
+    IndexReadbackWindows(readback, true);
     pending_readbacks.push_back(std::move(readback));
     ++g_async_readbacks;
     SweepTracking();
+}
+
+void BufferCache::IndexReadbackWindows(const PendingReadback& readback, bool add) {
+    boost::container::small_vector<u64, 16> windows;
+    for (const auto& [address, size] : readback.pieces) {
+        if (size == 0) {
+            continue;
+        }
+        for (u64 window = address >> 20; window <= (address + size - 1) >> 20; ++window) {
+            windows.push_back(window);
+        }
+    }
+    std::ranges::sort(windows);
+    const auto [first, last] = std::ranges::unique(windows);
+    windows.erase(first, last);
+    for (const u64 window : windows) {
+        if (add) {
+            ++pending_readback_windows[window];
+        } else if (const auto it = pending_readback_windows.find(window);
+                   it != pending_readback_windows.end() && --it->second == 0) {
+            pending_readback_windows.erase(it);
+        }
+    }
 }
 
 void BufferCache::PeekGpuRange(VAddr address, u64 size, u64 tag, u32 slot, u64 dispatch, u32 phase) {
@@ -3384,6 +3412,7 @@ void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
         });
         auto landed = std::move(readback.on_landed);
         RecycleSnapshot(readback.before);
+        IndexReadbackWindows(readback, false);
         pending_readbacks.pop_front();
         for (auto& fn : landed) {
             --deferred_signals;
@@ -4347,8 +4376,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             }
         }
         GpuRangesAdd(device_addr, size);
-        for (auto& readback : pending_readbacks) {
-            readback.NoteRewrite(device_addr, size);
+        if (TouchesPendingReadback(device_addr, size)) {
+            for (auto& readback : pending_readbacks) {
+                readback.NoteRewrite(device_addr, size);
+            }
         }
         ResolvePoisonedPages(device_addr, size);
     }

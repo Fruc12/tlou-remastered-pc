@@ -257,10 +257,16 @@ def main():
     # A game thread's write beside GPU bytes still being written (the copy shader 82c46b8b's
     # constant blocks in the per-frame rings) goes ahead instead of waiting ~37 ms for the frame
     # in flight; those GPU bytes are poisoned in guest memory until their data lands. Pages of
-    # the physics shaders and of DMA copies (results the game reads) still wait. The player's
-    # sessions in the Quarantine Zone (24 Oct 2026): frame time stddev ~15 -> ~10 ms, slow frames
-    # 41-72 -> 5-19 per 5 s, same FPS; GOW3_SHARE_CHECK=1 found no stale or poisoned bytes.
+    # the physics shaders (results the game reads) still wait. The player's sessions in the
+    # Quarantine Zone (24 Oct 2026): frame time stddev ~15 -> ~10 ms, slow frames 41-72 -> 5-19
+    # per 5 s, same FPS; GOW3_SHARE_CHECK=1 found no stale or poisoned bytes.
     env.setdefault("GOW3_SHARE_UNFINISHED_WRITES", "1")
+    # The small GPU-side DMA copies into guest memory (counters the game reads) come back with
+    # the next end-of-pipe fence, held until they land, so writes beside them need not wait
+    # either. Shared without it, the NPCs walked oddly. The player's sessions (25 Oct 2026):
+    # NPCs normal in 2 of 3 (rising in the first, with no difference found in its log), stddev
+    # ~11 -> ~8 ms, slow frames ~12 -> ~2 per 5 s. GOW3_DMA_EOP_READBACK=0: those pages wait.
+    env.setdefault("GOW3_DMA_EOP_READBACK", "1")
     env.setdefault("GOW3_NATIVE_TSC", "1")
     env.setdefault("GOW3_FRAME_STATS", "1")
     # Scripted controller input (tools/tlou_pad.py writes it).

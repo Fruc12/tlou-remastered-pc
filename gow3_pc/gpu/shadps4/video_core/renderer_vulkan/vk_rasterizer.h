@@ -150,6 +150,13 @@ public:
     /// `protected_only` (compute releases): only the read-protected ones (eop_readbacks); the
     /// others need the graphics fence to wait for them.
     bool ReadBackEopResults(bool protected_only = false);
+    /// gow3 25 Oct 2026 (GOW3_DMA_EOP_READBACK): the small GPU-side DMA copies into guest memory
+    /// since the last label (dma_results) are read back now, unprotected; true if some were.
+    bool ReadBackDmaResults();
+    /// Statistics: the kind of label that first follows DMA results (0 WRITE_DATA, 1 end of
+    /// pipe, 2 end of shader, 3 compute release). The player's session: always an end-of-pipe
+    /// event, whose fence waits for them (ReadBackEopResults).
+    void NoteLabelAfterDma(u32 kind);
     /// gow3: a fence label the runtime writes to guest memory (BufferCache::NoteCpuWrite).
     void NoteLabelWrite(VAddr address, u64 size) {
         buffer_cache.NoteCpuWrite(address, size);
@@ -539,6 +546,10 @@ private:
     /// frames, then one of 25-35 ms). Opt-in, GOW3_OPEN_RAYCAST_READBACKS=1: measured on the
     /// rooftops it removed the faults on ray-cast pages but not the uneven frames (18 Oct).
     std::vector<std::pair<VAddr, u64>> eop_open_readbacks;
+    /// gow3 25 Oct 2026: small GPU-side DMA copies into guest memory waiting for their readback
+    /// (ReadBackDmaResults); copies since the last label (statistics).
+    std::vector<std::pair<VAddr, u64>> dma_results;
+    bool dma_since_label = false;
     std::vector<std::pair<VAddr, u64>> eop_soft_readbacks; ///< gow3: tiny images, unprotected
     struct ClothPeek {
         VAddr address;

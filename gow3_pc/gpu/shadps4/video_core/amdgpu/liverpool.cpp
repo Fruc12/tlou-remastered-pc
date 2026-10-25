@@ -896,6 +896,7 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }
     const auto eop = *reinterpret_cast<const PM4CmdEventWriteEop*>(data);
     rasterizer.ProcessDownloadImages();
+    rasterizer.NoteLabelAfterDma(1);
     const bool results_pending = rasterizer.ReadBackEopResults();
     // The label is written through the backing view: older GPU data there must not come back.
     switch (eop.data_sel.Value()) {
@@ -1042,6 +1043,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         const char* env = std::getenv("GOW3_DEFER_RAYCAST_FENCES");
         return !(env && env[0] == '0');
     }();
+    rasterizer.NoteLabelAfterDma(3);
     const bool results_pending = rasterizer.ReadBackEopResults(true);
     auto& cache = rasterizer.GetBufferCache();
     if (defer && sel != DataSelect::GdsMemStore && (results_pending || cache.HasDeferredSignals())) {
@@ -1217,6 +1219,7 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
                      (header->type3.count.Value() - 2) * sizeof(u32), Gow3WriteLog::WriteData);
     Gow3WatchRange::Note("write data", 0, 0, write_data->Address<u64>(),
                          (header->type3.count.Value() - 2) * sizeof(u32));
+    rasterizer.NoteLabelAfterDma(0);
     const Vulkan::GpuWriteSite site{1};
     std::memcpy(write_data->Address<u64*>(), write_data->data,
                 (header->type3.count.Value() - 2) * sizeof(u32));
@@ -1228,6 +1231,7 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     rasterizer.ProcessDownloadImages();
+    rasterizer.NoteLabelAfterDma(2);
     rasterizer.NoteLabelWrite(event_eos.Address<VAddr>(), 4);
     NoteOvertake(rasterizer, "end-of-shader label", event_eos.Address<VAddr>());
     event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {

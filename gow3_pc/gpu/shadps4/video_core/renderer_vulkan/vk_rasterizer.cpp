@@ -861,6 +861,12 @@ static const std::vector<std::pair<u64, u32>>& TlouEopReadbackList() {
     return bindings;
 }
 
+static std::atomic<u32> g_dma_eop_readbacks{0}; ///< BufferCache::DmaEopReadbacks
+static std::array<std::atomic<u32>, 4> g_label_after_dma{}; ///< Rasterizer::NoteLabelAfterDma
+static bool DmaEopReadbacks() {
+    return VideoCore::BufferCache::DmaEopReadbacks();
+}
+
 bool IsEopReadbackShader(u64 hash) {
     return (hash == 0xc92150ba || (hash == 0x6a6422a9 && Copy64EopReadback())) &&
            EopReadbackMode() != 0;
@@ -3398,7 +3404,8 @@ bool Rasterizer::ReadBackEopResults(bool protected_only) {
         eop_soft_readbacks.clear();
     }
     // Ray-cast results: unprotected (see eop_open_readbacks); their fence waits for them.
-    bool open_pending = false;
+    // DMA results (GOW3_DMA_EOP_READBACK) likewise.
+    bool open_pending = !protected_only && ReadBackDmaResults();
     if (!protected_only && !eop_open_readbacks.empty()) {
         std::erase_if(eop_open_readbacks,
                       [this](const auto& r) { return !IsMapped(r.first, r.second); });
@@ -3437,13 +3444,39 @@ bool Rasterizer::ReadBackEopResults(bool protected_only) {
     ++readbacks;
     if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds(5)) {
         std::printf("EOP readbacks (5 s): %u (GPU results the guest reads after a fence, read-"
-                    "protected until copied); fence labels inside one: %u\n",
-                    readbacks, VideoCore::BufferCache::TakeLabelsInReadbacks());
+                    "protected until copied); fence labels inside one: %u; DMA results: %u, "
+                    "the label after them: WRITE_DATA %u, end of pipe %u, end of "
+                    "shader %u, compute release %u\n",
+                    readbacks, VideoCore::BufferCache::TakeLabelsInReadbacks(),
+                    g_dma_eop_readbacks.exchange(0, std::memory_order_relaxed),
+                    g_label_after_dma[0].exchange(0),
+                    g_label_after_dma[1].exchange(0), g_label_after_dma[2].exchange(0),
+                    g_label_after_dma[3].exchange(0));
         std::fflush(stdout);
         readbacks = 0;
         last = now;
     }
     return pending || open_pending;
+}
+
+bool Rasterizer::ReadBackDmaResults() {
+    if (dma_results.empty()) {
+        return false;
+    }
+    std::erase_if(dma_results, [this](const auto& r) { return !IsMapped(r.first, r.second); });
+    if (dma_results.empty()) {
+        return false;
+    }
+    buffer_cache.DownloadRangesAsync(dma_results, false, true, true);
+    dma_results.clear();
+    return true;
+}
+
+void Rasterizer::NoteLabelAfterDma(u32 kind) {
+    if (dma_since_label && kind < g_label_after_dma.size()) {
+        g_label_after_dma[kind].fetch_add(1, std::memory_order_relaxed);
+    }
+    dma_since_label = false;
 }
 
 void Rasterizer::SyncSmallGpuWrites() {
@@ -6663,8 +6696,9 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
     if (!dst_gds) {
         VideoCore::NoteRecentGpuWrite(dst, num_bytes, VideoCore::GpuWriterDmaCopy);
         // gow3 24 Oct 2026: small DMA copies are results the game reads (counters copied next
-        // to its own data: NPCs walked oddly with their pages shared), so those pages wait.
-        if (VideoCore::BufferCache::ShareUnfinishedWrites()) {
+        // to its own data: NPCs walked oddly with their pages shared), so those pages wait,
+        // unless they come back with the next end-of-pipe fence (DmaEopReadbacks, below).
+        if (VideoCore::BufferCache::ShareUnfinishedWrites() && !DmaEopReadbacks()) {
             buffer_cache.NoteResultPages(dst, num_bytes);
         }
     }
@@ -6710,6 +6744,15 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         .size = num_bytes,
     };
     runtime.CopyBuffer(src_buffer, dst_buffer, std::span{&copy, 1});
+    // gow3 25 Oct 2026: a small GPU-side copy into guest memory (GDS counters and the like, which
+    // the game reads) comes back at the next end-of-pipe event, whose fence is written once it
+    // has landed, as the ray-cast results do (eop_open_readbacks: the page stays readable, the
+    // game's own data shares it). The game's writes beside it then need not wait for it.
+    if (!dst_gds && DmaEopReadbacks() && num_bytes <= 256 && dma_results.size() < 256) {
+        dma_results.emplace_back(dst, num_bytes);
+        dma_since_label = true;
+        g_dma_eop_readbacks.fetch_add(1, std::memory_order_relaxed);
+    }
     // gow3: GPU-side copies into guest memory (GDS counters the CPU reads) come back with this
     // submission's readback, so the CPU's writes next to them wait for that readback at most.
     if (!dst_gds && sync_gpu_constants && num_bytes <= 4096 && small_gpu_writes.size() < 16384) {

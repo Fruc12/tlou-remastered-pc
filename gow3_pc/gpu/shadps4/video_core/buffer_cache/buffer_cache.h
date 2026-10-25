@@ -647,6 +647,12 @@ public:
     /// GPU bytes of its page whose GPU write is still running goes ahead on a shared page
     /// instead of waiting for that write (GOW3_FETCH_NO_BLOCK).
     static bool ShareUnfinishedWrites();
+    /// gow3 25 Oct 2026 (GOW3_DMA_EOP_READBACK=1, with GOW3_SHARE_UNFINISHED_WRITES; off by
+    /// default, on for The Last of Us in tools/probe_tlou.py): small
+    /// GPU-side DMA copies into guest memory (counters the game reads) come back at the next
+    /// end-of-pipe event, whose fence waits for them (Rasterizer::CopyBuffer); their pages are
+    /// then shared (poisoned) instead of waited for.
+    static bool DmaEopReadbacks();
     /// gow3 24 Oct 2026 diagnostics (GOW3_SHARE_CHECK=1): the pages those write faults waited
     /// for or shared, checked once clean again (no pending upload, readback or shared record):
     /// the GPU's copy of their CPU-owned bytes against guest memory (Rasterizer::OnSubmit).

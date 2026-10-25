@@ -870,6 +870,19 @@ static std::atomic<u32> g_fetch_deferrals{0};
 // such writes on physics result pages (waited for); poisoned pages a GPU write took back (or
 // could not: the page was CPU-writable).
 static std::atomic<u32> g_shared_unfinished_writes{0};
+bool BufferCache::DmaEopReadbacks() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_DMA_EOP_READBACK");
+        const bool enabled = env && env[0] == '1' && ShareUnfinishedWrites();
+        if (enabled) {
+            std::printf("GPU: small DMA copies into guest memory come back with the next "
+                        "end-of-pipe fence (GOW3_DMA_EOP_READBACK=1)\n");
+            std::fflush(stdout);
+        }
+        return enabled;
+    }();
+    return on;
+}
 static std::atomic<u32> g_result_page_waits{0}, g_poison_resolved{0}, g_poison_writable{0};
 static std::atomic<u32> g_poison_restored{0}; // RestorePoison: pages given their stale bytes back
 // gow3 24 Oct 2026 diagnostics (GOW3_SHARE_CHECK=1): the last operations on each poisoned page,
@@ -890,6 +903,20 @@ static void NotePoisonEvent(VAddr page, std::string event) {
         history.pop_front();
     }
     history.push_back(std::move(event));
+}
+static std::string PoisonHistory(VAddr page);
+/// A poisoned page's bytes went back to their pre-poison values (GPU ownership lost without
+/// data): where, with the page's history, 16 lines at most (GOW3_SHARE_CHECK=1).
+static void ReportPoisonRestore(const char* where, VAddr page) {
+    if (!ShareCheckEnabled()) {
+        return;
+    }
+    static std::atomic<int> printed{0};
+    if (printed.fetch_add(1, std::memory_order_relaxed) < 16) {
+        std::printf("Poison restore (%s): page %#llx; history:%s\n", where,
+                    static_cast<unsigned long long>(page), PoisonHistory(page).c_str());
+        std::fflush(stdout);
+    }
 }
 static std::string PoisonHistory(VAddr page) {
     std::scoped_lock lock{g_poison_history_mutex};
@@ -1293,6 +1320,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // readback guard can tell the CPU's later writes into them.
             const auto share_page = [&](std::vector<std::pair<VAddr, u64>>& readbacks) {
                 auto& slot = lazy_pages[page];
+                const bool new_slot = !slot;
                 if (!slot) {
                     slot = std::make_unique<LazyPage>();
                 }
@@ -1301,6 +1329,13 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 const bool backed = memory->TryReadBacking(page, guest.data(), LAZY_PAGE_SIZE);
                 if (!backed) {
                     memory->CopySparseMemory(page, guest.data(), LAZY_PAGE_SIZE);
+                }
+                // gow3 25 Oct 2026 (GOW3_SHARE_UNFINISHED_WRITES): a page shared here (a readback
+                // of its GPU bytes pending: DMA counters, GOW3_DMA_EOP_READBACK) is poisoned too,
+                // except the physics shaders' pages. Without it the readback guard's 64-byte
+                // line kept the game's line beside a counter, and the counter's old value.
+                if (new_slot && backed && DmaEopReadbacks() && !IsResultPage(page)) {
+                    slot->poisoned = true;
                 }
                 // gow3 24 Oct 2026: a poisoned page (share_poisoned) poisons its new GPU bytes
                 // too (this write fault: the guest cannot write the page meanwhile).
@@ -1318,8 +1353,11 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     poison_new = poison_new && memory->TryWriteBacking(std::bit_cast<u8*>(page),
                                                                        poisoned.data(), LAZY_PAGE_SIZE);
                 }
+                if (new_slot && slot->poisoned && !poison_new) {
+                    slot->poisoned = false; // nothing poisoned: an ordinary shared page
+                }
                 if (poison_new) {
-                    NotePoisonEvent(page, "extend");
+                    NotePoisonEvent(page, new_slot ? "share-pending" : "extend");
                 }
                 const auto& reference = poison_new ? poisoned : guest;
                 gpu_modified_ranges.ForEachInRange(page, 4096, [&](VAddr lo, VAddr hi) {
@@ -1331,7 +1369,9 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                         }
                     }
                 });
-                readbacks.emplace_back(page, 4096);
+                // A poisoned page's GPU bytes always come back (the shared readbacks of `readbacks`
+                // are dropped without the constants sync).
+                (slot->poisoned ? unfinished_shared_readbacks : readbacks).emplace_back(page, 4096);
                 NoteReadbackKind(page, 4096, ReadbackSharedPage);
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                 ++g_shared_writes_count;
@@ -1506,7 +1546,9 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     // Five player sessions later: no stale or poisoned game bytes left, NPCs
                     // normal, frame time stddev ~15 -> ~10 ms. (The DMA page's differences the
                     // check reports are on the waited path too: labels the runtime writes into
-                    // guest memory only.)
+                    // guest memory only.) 25 Oct 2026: with GOW3_DMA_EOP_READBACK the DMA
+                    // copies come back with the next end-of-pipe fence and their pages are
+                    // shared too (stddev ~8 ms).
                     if (!semaphore->IsFree(tick) && ShareUnfinishedWrites() && shared_writes &&
                         !gpu_modified_ranges.Intersects(device_addr, size)) {
                         if (IsResultPage(page)) {
@@ -1951,6 +1993,7 @@ void BufferCache::ForEachLazyUploadPiece(VAddr address, u64 size, Func&& func) {
                                         hi_limit - lo_limit);
                 g_poison_restored.fetch_add(1, std::memory_order_relaxed);
                 NotePoisonEvent(page, fmt::format("upload-stale{}", stale));
+                ReportPoisonRestore("upload", page);
             }
         }
         u32 poisoned_cpu = 0, poisoned_skip = 0;
@@ -2622,6 +2665,9 @@ void BufferCache::RestorePoison(VAddr lo, VAddr hi) {
             g_poison_restored.fetch_add(1, std::memory_order_relaxed);
         }
         NotePoisonEvent(page, "drop");
+        if (restored) {
+            ReportPoisonRestore("dropped readback piece", page);
+        }
         it = record.tracked.none() ? lazy_pages.erase(it) : std::next(it);
     }
 }
@@ -3873,6 +3919,9 @@ void BufferCache::EraseLazyPages(VAddr address, u64 size) {
             }
             NotePoisonEvent(page, fmt::format("erase{}{}", restored ? "-restored" : "",
                                               record.tracked.any() ? "-kept" : ""));
+            if (restored) {
+                ReportPoisonRestore("download", page);
+            }
             if (record.tracked.any()) {
                 ++it;
                 continue;

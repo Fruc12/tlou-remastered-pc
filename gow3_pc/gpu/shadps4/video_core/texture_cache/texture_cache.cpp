@@ -1808,6 +1808,14 @@ void TextureCache::GarbageCollectImages() {
             next_reading = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
         }
     }
+    // gow3 26 Oct 2026: recycled images (image.cpp ImageRecycler) stay below the critical level
+    // and go first at it. Bounded by the pressure level instead (session 36), they were hardly
+    // kept: The Last of Us runs right below it (3073 of 3074 MiB), reuse fell from 27-39 to 1-6
+    // images per 10 s and image creation in stalled frames doubled (99 -> 205 ms).
+    TrimImageRecycler(total_used_memory >= critical_gc_memory,
+                      total_used_memory < critical_gc_memory
+                          ? critical_gc_memory - total_used_memory
+                          : 0);
     if (total_used_memory < trigger_gc_memory) {
         return;
     }

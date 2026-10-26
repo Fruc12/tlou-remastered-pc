@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <mutex>
 #include <cstdlib>
 #include <thread>
 #include "common/thread.h"
@@ -254,24 +255,167 @@ void DestroyImage(VmaAllocator allocator, vk::Image image, VmaAllocation allocat
 }
 } // namespace
 
+namespace {
+/// gow3 26 Oct 2026: large images freed by the texture cache are kept a while and handed to the
+/// next image with the same description. The Last of Us moves its shadow arrays (512x512x48 and
+/// 1024x1024x12 depth, 96 MiB each) to a new address every ~12 s: the old ones are collected and
+/// new ones created, each 18-29 ms on the GPU command thread (a new 256 MiB driver block:
+/// they do not fit the 64 MiB SpareBlockKeeper keeps), frames of 40-70 ms. A kept image was
+/// freed after the GPU was done with it (DeleteImage defers that); its contents and layout are
+/// undefined, as a new image's are. GOW3_IMAGE_RECYCLE=0: off.
+class ImageRecycler {
+public:
+    static bool Enabled() {
+        static const bool enabled = [] {
+            const char* env = std::getenv("GOW3_IMAGE_RECYCLE");
+            return !(env && env[0] == '0');
+        }();
+        return enabled;
+    }
+
+    static ImageRecycler& Get() {
+        static ImageRecycler* recycler = new ImageRecycler; // emptied by FlushImageReaper
+        return *recycler;
+    }
+
+    /// Takes `image` (being destroyed) when it is worth keeping.
+    bool Keep(UniqueImage& image) {
+        if (!image.image || !image.allocation || image.image_ci.pNext ||
+            image.image_ci.pQueueFamilyIndices || image.size_bytes < MinSize ||
+            image.size_bytes > Budget) {
+            return false;
+        }
+        std::vector<Item> dropped;
+        {
+            std::scoped_lock lock{mutex};
+            // The room the texture cache leaves below its critical level bounds what is kept.
+            if (image.size_bytes > room) {
+                ++refused;
+                return false;
+            }
+            room -= image.size_bytes;
+            items.push_back({image.allocator, image.allocation, image.image, image.image_ci,
+                             image.size_bytes, Clock::now()});
+            held += image.size_bytes;
+            ++kept;
+            while (held > Budget || items.size() > MaxItems) {
+                dropped.push_back(PopOldest());
+            }
+        }
+        image.image = vk::Image{};
+        image.allocation = {};
+        Destroy(dropped);
+        return true;
+    }
+
+    /// Fills `image` with a kept image made with `image_ci` (the most recent such).
+    bool Take(const vk::ImageCreateInfo& image_ci, UniqueImage& image) {
+        std::scoped_lock lock{mutex};
+        for (auto it = items.rbegin(); it != items.rend(); ++it) {
+            if (it->image_ci == image_ci && it->allocator == image.allocator) {
+                image.image = it->image;
+                image.allocation = it->allocation;
+                image.size_bytes = it->size_bytes;
+                held -= it->size_bytes;
+                ++reused;
+                items.erase(std::next(it).base());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void Trim(bool all, u64 room_left) {
+        const auto now = Clock::now();
+        std::vector<Item> dropped;
+        {
+            std::scoped_lock lock{mutex};
+            room = room_left;
+            if (!all && now < next_check) {
+                return;
+            }
+            next_check = now + std::chrono::seconds(1);
+            while (!items.empty() && (all || now - items.front().kept_at > MaxAge)) {
+                dropped.push_back(PopOldest());
+            }
+            if (now - last_report >= std::chrono::seconds(10) &&
+                (kept || reused || expired || refused)) {
+                std::printf("Image recycler (10 s): %u images reused, %u kept, %u freed, %u not "
+                            "kept (no room below the critical level); %.0f MiB held in %zu\n",
+                            reused, kept, expired + u32(dropped.size()), refused,
+                            held / 1048576.0, items.size());
+                last_report = now;
+                kept = reused = expired = refused = 0;
+            } else {
+                expired += u32(dropped.size());
+            }
+        }
+        Destroy(dropped);
+    }
+
+private:
+    using Clock = std::chrono::steady_clock;
+    static constexpr VkDeviceSize MinSize = VkDeviceSize{4} << 20;
+    static constexpr VkDeviceSize Budget = VkDeviceSize{256} << 20;
+    static constexpr size_t MaxItems = 16;
+    static constexpr auto MaxAge = std::chrono::seconds(30);
+
+    struct Item {
+        VmaAllocator allocator;
+        VmaAllocation allocation;
+        vk::Image image;
+        vk::ImageCreateInfo image_ci;
+        VkDeviceSize size_bytes;
+        Clock::time_point kept_at;
+    };
+
+    Item PopOldest() {
+        Item item = items.front();
+        items.erase(items.begin());
+        held -= item.size_bytes;
+        return item;
+    }
+
+    static void Destroy(const std::vector<Item>& dropped) {
+        for (const auto& item : dropped) {
+            DestroyImage(item.allocator, item.image, item.allocation);
+        }
+    }
+
+    std::mutex mutex;
+    std::vector<Item> items; ///< oldest first
+    VkDeviceSize held = 0;
+    u64 room = ~0ULL; ///< video memory the kept images may still take (Trim)
+    u32 kept = 0, reused = 0, expired = 0, refused = 0;
+    Clock::time_point next_check{}, last_report{};
+};
+} // namespace
+
+void TrimImageRecycler(bool all, u64 room) {
+    if (ImageRecycler::Enabled()) {
+        ImageRecycler::Get().Trim(all, all ? 0 : room);
+    }
+}
+
 void FlushImageReaper() {
+    TrimImageRecycler(true, 0);
     if (ImageReaper::Enabled()) {
         ImageReaper::Get().Flush();
     }
 }
 
 UniqueImage::~UniqueImage() {
-    if (image) {
+    if (image && !(ImageRecycler::Enabled() && ImageRecycler::Get().Keep(*this))) {
         DestroyImage(allocator, image, allocation);
     }
 }
 
 void UniqueImage::Destroy() {
-    if (image) {
+    if (image && !(ImageRecycler::Enabled() && ImageRecycler::Get().Keep(*this))) {
         DestroyImage(allocator, image, allocation);
-        image = vk::Image{};
-        allocation = {};
     }
+    image = vk::Image{};
+    allocation = {};
 }
 
 namespace {
@@ -374,6 +518,9 @@ private:
 void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     this->image_ci = image_ci;
     ASSERT(!image);
+    if (ImageRecycler::Enabled() && ImageRecycler::Get().Take(image_ci, *this)) {
+        return;
+    }
     const VmaAllocationCreateInfo alloc_ci = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,

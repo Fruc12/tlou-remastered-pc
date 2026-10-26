@@ -48,9 +48,10 @@ struct UniqueImage {
     UniqueImage& operator=(const UniqueImage&) = delete;
 
     UniqueImage(UniqueImage&& other)
-        : allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
+        : device{other.device}, allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
-          image{std::exchange(other.image, VK_NULL_HANDLE)}, image_ci{std::move(other.image_ci)} {}
+          image{std::exchange(other.image, VK_NULL_HANDLE)}, image_ci{std::move(other.image_ci)},
+          size_bytes{std::exchange(other.size_bytes, 0)} {}
     UniqueImage& operator=(UniqueImage&& other) {
         if (this == &other) return *this;
         Destroy();
@@ -59,6 +60,7 @@ struct UniqueImage {
         allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
         image_ci = std::move(other.image_ci);
+        size_bytes = std::exchange(other.size_bytes, 0);
         return *this;
     }
 
@@ -82,6 +84,11 @@ public:
     vk::ImageCreateInfo image_ci{};
     vk::DeviceSize size_bytes{};
 };
+
+/// gow3 26 Oct 2026: frees the recycled images (see image.cpp ImageRecycler) kept longer than a
+/// while, or all of them (`all`: critical memory use, shutdown). `room`: the video memory left
+/// below the texture cache's critical level; images kept from now on stay within it.
+void TrimImageRecycler(bool all, u64 room = ~0ULL);
 
 struct Image {
     /// gow3: `layer_capacity` above the guest's layers creates the host image with spare layers

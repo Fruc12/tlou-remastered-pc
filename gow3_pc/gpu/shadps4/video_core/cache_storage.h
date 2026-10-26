@@ -61,6 +61,9 @@ public:
     size_t CountBlobs(BlobType type);
     /// gow3: the names of the blobs of a type (as Load takes them), without reading them.
     void ForEachBlobName(BlobType type, const std::function<void(const std::string& name)>& func);
+    /// gow3: whether a blob is stored (Load of a missing one logs an error). Plain files only:
+    /// false for the zip archive.
+    [[nodiscard]] bool Exists(BlobType type, const std::string& name) const;
 
 private:
     std::jthread io_worker{};

@@ -22,5 +22,13 @@ uint64_t runtime_process_time_counter() { return runtime_process_time_us() * 100
 uint64_t runtime_read_tsc() { return runtime_process_time_counter(); }
 int32_t* runtime_errno() { std::abort(); }
 int runtime_memory_write_backing(uintptr_t, const void*, uint64_t) { std::abort(); }
+int runtime_memory_read_backing(uintptr_t, void*, uint64_t) { std::abort(); }
+void runtime_memory_copy_backing(uintptr_t, void*, uint64_t) { std::abort(); }
+void* runtime_map_guest_memory(uint64_t) { std::abort(); }
+void runtime_exec_watch_retarget(uint64_t) { std::abort(); }
+int runtime_gamesettings_active(void) { return 0; }
+void runtime_pad_effective_maps(const char*, const char*, const char*, char*, char*, char*,
+                                size_t) { std::abort(); }
+volatile unsigned long long runtime_video_frame_lo = 0, runtime_video_frame_hi = 0;
 }
 

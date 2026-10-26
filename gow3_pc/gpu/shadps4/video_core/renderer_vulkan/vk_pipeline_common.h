@@ -57,6 +57,9 @@ public:
         return is_compute;
     }
 
+    /// gow3: scheduler tick of the last draw or dispatch that took it (the warm-up order).
+    mutable u64 last_use = 0;
+
     using DescriptorWrites = std::vector<vk::WriteDescriptorSet>;
     void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data) const;
 

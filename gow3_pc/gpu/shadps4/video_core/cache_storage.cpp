@@ -302,6 +302,16 @@ void DataBase::ForEachBlobName(BlobType type,
     }
 }
 
+bool DataBase::Exists(BlobType type, const std::string& name) const {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return false;
+    }
+    auto path = cache_path / name;
+    path.replace_extension(GetBlobFileExtension(type));
+    std::error_code error;
+    return std::filesystem::exists(path, error);
+}
+
 bool DataBase::ConcurrentReads() const {
     return !EmulatorSettings.IsPipelineCacheArchived();
 }

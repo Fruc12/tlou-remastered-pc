@@ -1183,11 +1183,19 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     PublishGraphics();
     DrainPrefetch();
     PumpWarmUp();
+    NoteWarmupOrder();
+    const u64 tick = scheduler.CurrentTick();
+    const auto used = [tick](const GraphicsPipeline* pipeline) {
+        if (pipeline) {
+            pipeline->last_use = tick;
+        }
+        return pipeline;
+    };
     used_prepared = nullptr;
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
             used_prepared = prepared;
-            return pipeline;
+            return used(pipeline);
         }
     }
     sel.draw_indirect_params = params;
@@ -1207,7 +1215,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
         const auto found = graphics_pipelines.find(sel.graphics_key);
         if (found != graphics_pipelines.end()) {
-            return found->second->Failed() ? nullptr : found->second.get();
+            return used(found->second->Failed() ? nullptr : found->second.get());
         }
         if (!pending_graphics.contains(sel.graphics_key) &&
             (failed_graphics.empty() || !failed_graphics.contains(sel.graphics_key)) &&
@@ -1263,7 +1271,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             PublishGraphics();
             if (const auto found = graphics_pipelines.find(sel.graphics_key);
                 found != graphics_pipelines.end()) {
-                return found->second->Failed() ? nullptr : found->second.get();
+                return used(found->second->Failed() ? nullptr : found->second.get());
             }
         }
     }
@@ -1298,7 +1306,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         sel.fetch_shader.reset();
     }
-    return it->second->Failed() ? nullptr : it->second.get();
+    return used(it->second->Failed() ? nullptr : it->second.get());
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
@@ -1306,6 +1314,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     PublishGraphics();
     DrainPrefetch();
     PumpWarmUp();
+    NoteWarmupOrder();
     AdoptPrecompiled();
     if (!RefreshComputeKey()) {
         return nullptr;
@@ -1359,6 +1368,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
             std::fflush(stdout);
         }
     }
+    it->second->last_use = scheduler.CurrentTick();
     return it->second.get();
 }
 

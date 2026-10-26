@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <chrono>
 #include <functional>
+#include <string>
+#include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <shared_mutex>
@@ -236,10 +239,20 @@ private:
     bool CheckCacheProfile();
     struct BackgroundWarmup;
     struct WarmStage;
+    void ReadWarmEntries(BackgroundWarmup& warm);
     void ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data);
     bool MergeWarmStage(WarmStage& stage);
     void PumpWarmUp();
     void StopWarmUp();
+    /// gow3 25 Oct 2026: the cached pipelines in order of their last use, most recent first, for
+    /// the next background warm-up (vk_pipeline_serialization.cpp).
+    void NoteWarmupOrder();
+    void SaveWarmupOrder();
+    std::vector<std::string> ReadWarmupOrder();
+    std::vector<std::string> previous_warm_order; ///< the last session's (its reader fills it)
+    bool previous_warm_order_read = false;
+    u32 warm_order_calls = 0;
+    std::chrono::steady_clock::time_point warm_order_saved{};
     bool AsyncCompilation() const;
     /// gow3: this draw's shaders and pipeline compile at once instead of being skipped while
     /// they compile in the background (draws into small color targets only).

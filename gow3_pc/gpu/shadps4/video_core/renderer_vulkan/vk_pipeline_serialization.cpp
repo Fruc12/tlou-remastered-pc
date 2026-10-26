@@ -56,6 +56,69 @@ namespace PipelineBinaryCache {
 bool ValidKey(const Key& key) {
     return !key.empty() && key.size() <= VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR;
 }
+
+// gow3 25 Oct 2026: the shared store, <directory>/shared/<driver key>_<XXH3>.blob, the raw
+// binary. Binaries read or written this session stay in memory (one 2 MiB binary for The Last of
+// Us), up to a budget.
+namespace {
+std::mutex g_shared_mutex;
+std::unordered_map<std::filesystem::path::string_type, std::shared_ptr<const std::vector<u8>>>
+    g_shared_kept;
+size_t g_shared_kept_bytes = 0;
+constexpr size_t SharedKeptBudget = 256 * 1024 * 1024;
+std::atomic<u64> g_shared_stored{0}, g_shared_read{0}, g_shared_damaged{0};
+
+std::filesystem::path SharedPath(const std::filesystem::path& directory, const Key& key, u64 hash) {
+    std::string name;
+    for (const auto byte : key) {
+        name += fmt::format("{:02x}", byte);
+    }
+    return directory / "shared" / fmt::format("{}_{:016x}.blob", name, hash);
+}
+
+std::shared_ptr<const std::vector<u8>> KeepShared(const std::filesystem::path& path,
+                                                  std::shared_ptr<const std::vector<u8>> data) {
+    std::scoped_lock lock{g_shared_mutex};
+    const auto [it, inserted] = g_shared_kept.try_emplace(path.native());
+    if (!inserted) {
+        return it->second; // another thread read it first
+    }
+    if (g_shared_kept_bytes + data->size() > SharedKeptBudget) {
+        g_shared_kept.erase(it);
+        return data;
+    }
+    g_shared_kept_bytes += data->size();
+    it->second = data;
+    return data;
+}
+
+std::shared_ptr<const std::vector<u8>> LoadShared(const std::filesystem::path& directory,
+                                                  const Key& key, u32 size, u64 hash) {
+    const auto path = SharedPath(directory, key, hash);
+    {
+        std::scoped_lock lock{g_shared_mutex};
+        if (const auto it = g_shared_kept.find(path.native()); it != g_shared_kept.end()) {
+            return it->second->size() == size ? it->second : nullptr;
+        }
+    }
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream) {
+        return nullptr;
+    }
+    auto data = std::make_shared<std::vector<u8>>(size);
+    const bool whole = stream.tellg() == std::streamoff(size) && stream.seekg(0) &&
+                       stream.read(reinterpret_cast<char*>(data->data()), size);
+    stream.close();
+    if (!whole || XXH3_64bits(data->data(), data->size()) != hash) {
+        ++g_shared_damaged;
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        return nullptr;
+    }
+    ++g_shared_read;
+    return KeepShared(path, std::move(data));
+}
+} // namespace
 std::vector<u8> Encode(const Key& global, const Key& pipeline, u64 graphics_hash,
                        const std::vector<Binary>& binaries) {
     if (!ValidKey(global) || !ValidKey(pipeline) || binaries.empty() ||
@@ -71,19 +134,34 @@ std::vector<u8> Encode(const Key& global, const Key& pipeline, u64 graphics_hash
         append(u32(data.size()));
         bytes.insert(bytes.end(), data.begin(), data.end());
     };
+    // Version 2: each binary has a kind, 0 inline (size, data) or 1 shared (size, hash).
+    const bool any_shared =
+        std::ranges::any_of(binaries, [](const Binary& binary) { return binary.shared_hash != 0; });
     append(u32{0x31425047}); // GPB1, little-endian Windows/Linux cache format.
-    append(u32{1});
+    append(u32{any_shared ? 2u : 1u});
     append(graphics_hash);
     blob(global);
     blob(pipeline);
     append(u32(binaries.size()));
     for (const auto& binary : binaries) {
-        if (!ValidKey(binary.key) || binary.data.empty() || binary.data.size() > MaxFileSize ||
-            bytes.size() + binary.key.size() + binary.data.size() + 16 > MaxFileSize) {
+        const bool shared = binary.shared_hash != 0;
+        if (!ValidKey(binary.key) ||
+            (shared ? !binary.shared_size || binary.shared_size > MaxFileSize
+                    : binary.data.empty() || binary.data.size() > MaxFileSize) ||
+            bytes.size() + binary.key.size() + (shared ? 0 : binary.data.size()) + 24 >
+                MaxFileSize) {
             return {};
         }
         blob(binary.key);
-        blob(binary.data);
+        if (any_shared) {
+            append(u32{shared ? 1u : 0u});
+        }
+        if (shared) {
+            append(binary.shared_size);
+            append(binary.shared_hash);
+        } else {
+            blob(binary.data);
+        }
     }
     append(u64{XXH3_64bits(bytes.data(), bytes.size())});
     return bytes;
@@ -121,7 +199,7 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
     u32 magic, version, count;
     u64 stored_hash;
     Key stored_global, stored_pipeline;
-    if (!read(magic) || magic != 0x31425047 || !read(version) || version != 1 ||
+    if (!read(magic) || magic != 0x31425047 || !read(version) || (version != 1 && version != 2) ||
         !read(stored_hash) || stored_hash != graphics_hash || !blob(stored_global, 32) ||
         stored_global != global || !blob(stored_pipeline, 32) || stored_pipeline != pipeline ||
         !read(count) || !count || count > MaxBinaries) {
@@ -129,7 +207,20 @@ std::optional<std::vector<Binary>> Decode(std::span<const u8> bytes, const Key& 
     }
     std::vector<Binary> binaries(count);
     for (auto& binary : binaries) {
-        if (!blob(binary.key, 32) || !blob(binary.data, MaxFileSize)) {
+        if (!blob(binary.key, 32)) {
+            return std::nullopt;
+        }
+        u32 kind = 0;
+        if (version == 2 && (!read(kind) || kind > 1)) {
+            return std::nullopt;
+        }
+        if (kind == 1) {
+            if (!read(binary.shared_size) || !binary.shared_size ||
+                binary.shared_size > MaxFileSize || !read(binary.shared_hash) ||
+                !binary.shared_hash) {
+                return std::nullopt;
+            }
+        } else if (!blob(binary.data, MaxFileSize)) {
             return std::nullopt;
         }
     }
@@ -189,7 +280,57 @@ std::optional<std::vector<Binary>> Load(const std::filesystem::path& file, const
     if (!stream.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) {
         return std::nullopt;
     }
-    return Decode(bytes, global, pipeline, graphics_hash);
+    auto binaries = Decode(bytes, global, pipeline, graphics_hash);
+    if (!binaries) {
+        return std::nullopt;
+    }
+    for (auto& binary : *binaries) {
+        if (binary.shared_hash &&
+            !(binary.shared = LoadShared(file.parent_path(), binary.key, binary.shared_size,
+                                         binary.shared_hash))) {
+            return std::nullopt;
+        }
+    }
+    return binaries;
+}
+
+bool HasLargeInline(const std::vector<Binary>& binaries) {
+    return std::ranges::any_of(binaries, [](const Binary& binary) {
+        return !binary.shared_hash && binary.data.size() >= SharedMinSize;
+    });
+}
+
+bool StoreShared(const std::filesystem::path& directory, std::vector<Binary>& binaries) {
+    bool stored_all = true;
+    for (auto& binary : binaries) {
+        if (binary.shared_hash || binary.data.size() < SharedMinSize ||
+            binary.data.size() > MaxFileSize) {
+            continue;
+        }
+        const u64 hash = XXH3_64bits(binary.data.data(), binary.data.size());
+        if (!hash) {
+            continue;
+        }
+        const u32 size = u32(binary.data.size());
+        // A stored copy is used when it reads back whole (a damaged one is written again).
+        auto data = LoadShared(directory, binary.key, size, hash);
+        if (!data) {
+            auto owned = std::make_shared<std::vector<u8>>(std::move(binary.data));
+            if (!Save(SharedPath(directory, binary.key, hash), *owned)) {
+                binary.data = std::move(*owned);
+                stored_all = false;
+                continue;
+            }
+            ++g_shared_stored;
+            data = KeepShared(SharedPath(directory, binary.key, hash), std::move(owned));
+        }
+        binary.data.clear();
+        binary.data.shrink_to_fit();
+        binary.shared = std::move(data);
+        binary.shared_size = size;
+        binary.shared_hash = hash;
+    }
+    return stored_all;
 }
 } // namespace PipelineBinaryCache
 
@@ -198,6 +339,7 @@ std::atomic<u64> binary_hits{}, binary_misses{}, binary_rejected{}, binary_saved
 std::atomic<u64> binary_restore_ns{}, binary_compile_ns{};
 std::atomic<u64> binary_restore_calls{}, binary_compile_calls{};
 std::atomic<u64> binary_key_ns{}, binary_load_ns{}, binary_handles_ns{};
+std::atomic<u64> binary_moved_to_shared{};
 u64 ElapsedNs(std::chrono::steady_clock::time_point started) {
     return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                    std::chrono::steady_clock::now() - started).count());
@@ -255,13 +397,18 @@ void ReportPipelineBinaryCache() {
     const auto hits = binary_hits.load();
     const auto misses = binary_misses.load();
     std::printf("Pipeline binary cache: %llu hits, %llu compiled, %llu rejected, %llu saved, "
-                "%llu cache errors (restore %.3f ms, compile %.3f ms each)\n",
+                "%llu cache errors (restore %.3f ms, compile %.3f ms each); shared binaries: "
+                "%llu stored, %llu read, %llu damaged, %llu files moved to them\n",
                 static_cast<unsigned long long>(hits), static_cast<unsigned long long>(misses),
                 static_cast<unsigned long long>(binary_rejected.load()),
                 static_cast<unsigned long long>(binary_saved.load()),
                 static_cast<unsigned long long>(binary_errors.load()),
                 binary_restore_ns.load() / 1e6 / std::max(u64{1}, binary_restore_calls.load()),
-                binary_compile_ns.load() / 1e6 / std::max(u64{1}, binary_compile_calls.load()));
+                binary_compile_ns.load() / 1e6 / std::max(u64{1}, binary_compile_calls.load()),
+                static_cast<unsigned long long>(PipelineBinaryCache::g_shared_stored.load()),
+                static_cast<unsigned long long>(PipelineBinaryCache::g_shared_read.load()),
+                static_cast<unsigned long long>(PipelineBinaryCache::g_shared_damaged.load()),
+                static_cast<unsigned long long>(binary_moved_to_shared.load()));
 }
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
@@ -336,8 +483,12 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         if (!binaries) {
             binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
             if (binaries) {
+                StoreShared(directory, *binaries);
                 Save(file, Encode(global, pipeline_id, 0, *binaries));
             }
+        } else if (HasLargeInline(*binaries) && StoreShared(directory, *binaries) &&
+                   Save(file, Encode(global, pipeline_id, 0, *binaries))) {
+            ++binary_moved_to_shared; // gow3 25 Oct 2026: a file of before the shared store
         }
         binary_load_ns += ElapsedNs(load_started);
         if (binaries) {
@@ -347,7 +498,8 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                 keys[i].sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR;
                 keys[i].keySize = u32((*binaries)[i].key.size());
                 std::ranges::copy((*binaries)[i].key, keys[i].key);
-                data[i] = {(*binaries)[i].data.size(), (*binaries)[i].data.data()};
+                const auto bytes = (*binaries)[i].Bytes();
+                data[i] = {bytes.size(), const_cast<u8*>(bytes.data())};
             }
             VkPipelineBinaryKeysAndDataKHR stored{u32(keys.size()), keys.data(), data.data()};
             VkPipelineBinaryCreateInfoKHR binary_info{
@@ -446,6 +598,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             binary.data.resize(size);
             binaries.push_back(std::move(binary));
         }
+        StoreShared(directory, binaries);
         const auto encoded = Encode(global, pipeline_id, 0, binaries);
         if (Save(file, encoded)) {
             ++binary_saved;
@@ -1149,6 +1302,7 @@ struct PipelineCache::WarmStage {
     std::optional<Shader::Gcn::FetchShaderData> fetch;
     size_t perm_idx{};
     vk::ShaderModule module{};
+    std::once_flag loaded; ///< the first reader that needs it reads it; the others wait
     // GPU thread, from the merge on.
     bool merged = false;
     bool module_kept = false;           ///< the module now belongs to a Program
@@ -1180,7 +1334,12 @@ struct PipelineCache::BackgroundWarmup {
         std::unique_ptr<ComputePipeline> compute;
     };
 
-    std::unordered_map<u64, std::shared_ptr<WarmStage>> stages; ///< read job only
+    std::unordered_map<u64, std::shared_ptr<WarmStage>> stages; ///< readers, under stages_mutex
+    std::mutex stages_mutex;
+    std::vector<std::string> order; ///< PipelineKey names, in reading order
+    std::atomic<size_t> next_read{0};
+    std::atomic<u32> readers_running{0};
+    std::chrono::steady_clock::time_point reader_started{};
     WarmupInbox<Entry> read;
     WarmupInbox<Built> built;
     std::atomic<u32> total{0}, done{0};
@@ -1188,10 +1347,11 @@ struct PipelineCache::BackgroundWarmup {
     std::atomic<u64> reader_ns{0}, entry_ns{0}, shader_io_ns{0}, module_ns{0};
     std::atomic<u64> read_queue_ns{0}, build_queue_ns{0}, build_ns{0};
     std::atomic<u32> entries{0}, modules{0}, submitted{0}, completed{0};
+    std::atomic<u32> in_order{0}; ///< read first, in the last session's order of use
     u64 pump_ns = 0, pump_max_ns = 0, pump_gap_max_ns = 0;
     u32 batches = 0;
     bool finished = false;
-    u32 loaded = 0, threads = 0;
+    u32 loaded = 0, threads = 0, readers = 1;
     std::chrono::steady_clock::time_point started, last_batch;
     std::chrono::steady_clock::time_point last_pump{}, last_report{};
     std::unique_ptr<WarmupPool> pool; ///< last: its jobs use the members above
@@ -1214,18 +1374,78 @@ bool PipelineCache::StartBackgroundWarmUp() {
         const auto reader_started = std::chrono::steady_clock::now();
         auto& db = Storage::DataBase::Instance();
         FindCrowdedShaders();
-        warm.total = u32(db.CountBlobs(Storage::BlobType::PipelineKey));
-        db.ForEachBlob(
-            Storage::BlobType::PipelineKey,
-            [&](std::vector<u8>&& data) { ReadWarmEntry(warm, std::move(data)); },
-            [&] { return warm.stopping.load(std::memory_order_relaxed); });
-        warm.stages.clear();
-        warm.reader_ns = ElapsedNs(reader_started);
-        warm.reading = false;
+        // gow3 25 Oct 2026: the pipelines the game used last come first (SaveWarmupOrder). In
+        // directory order the ones a start needs (menu, the area of the save) were spread over
+        // the whole read (~16 s), and the game built ~100 of them itself in its first seconds
+        // (frames of 40-130 ms).
+        std::vector<std::string> names;
+        db.ForEachBlobName(Storage::BlobType::PipelineKey,
+                           [&](const std::string& name) { names.push_back(name); });
+        warm.total = u32(names.size());
+        previous_warm_order = ReadWarmupOrder();
+        std::unordered_set<std::string> unread{names.begin(), names.end()};
+        std::vector<std::string> order;
+        order.reserve(names.size());
+        for (const auto& name : previous_warm_order) {
+            if (unread.erase(name)) {
+                order.push_back(name);
+            }
+        }
+        warm.in_order = u32(order.size());
+        for (auto& name : names) {
+            if (unread.contains(name)) {
+                order.push_back(std::move(name));
+            }
+        }
+        warm.order = std::move(order);
+        warm.reader_started = reader_started;
+        previous_warm_order_read = true;
+        // gow3 26 Oct 2026: several readers (half the pool, GOW3_WARMUP_READERS=<n>): one read
+        // only ~280-400 entries a second while the game loaded (two small files per new shader
+        // stage, ~2.8 ms each), and the session's first pipelines waited behind it.
+        static const u32 readers_wanted = [] {
+            const char* env = std::getenv("GOW3_WARMUP_READERS");
+            return env && *env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+        }();
+        const u32 readers = std::clamp(readers_wanted ? readers_wanted : warm.threads / 2, 1u,
+                                       warm.threads);
+        warm.readers = readers;
+        warm.readers_running = readers;
+        for (u32 i = 1; i < readers; ++i) {
+            warm.pool->Push([this, &warm] {
+                ReadWarmEntries(warm);
+                return true;
+            });
+        }
+        ReadWarmEntries(warm);
         return true;
     });
     std::printf("Pipeline warm-up: loading in the background (%u threads)\n", warm.threads);
     return true;
+}
+
+void PipelineCache::ReadWarmEntries(BackgroundWarmup& warm) {
+    auto& db = Storage::DataBase::Instance();
+    for (size_t i = warm.next_read.fetch_add(1, std::memory_order_relaxed); i < warm.order.size();
+         i = warm.next_read.fetch_add(1, std::memory_order_relaxed)) {
+        if (warm.stopping.load(std::memory_order_relaxed)) {
+            break;
+        }
+        std::vector<u8> data;
+        db.Load(Storage::BlobType::PipelineKey, warm.order[i], data);
+        if (!data.empty()) {
+            ReadWarmEntry(warm, std::move(data));
+        }
+    }
+    // The last reader ends the reading (the GPU thread waits for `reading` to finish up).
+    if (warm.readers_running.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        {
+            std::scoped_lock lock{warm.stages_mutex};
+            warm.stages.clear();
+        }
+        warm.reader_ns = ElapsedNs(warm.reader_started);
+        warm.reading = false;
+    }
 }
 
 void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data) {
@@ -1263,9 +1483,16 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
         if (!hashes[i]) {
             continue;
         }
-        auto& stage = warm.stages[hashes[i]];
-        if (!stage) {
-            stage = std::make_shared<WarmStage>();
+        std::shared_ptr<WarmStage> stage;
+        {
+            std::scoped_lock lock{warm.stages_mutex};
+            auto& slot = warm.stages[hashes[i]];
+            if (!slot) {
+                slot = std::make_shared<WarmStage>();
+            }
+            stage = slot;
+        }
+        std::call_once(stage->loaded, [&] {
             stage->device = instance.GetDevice();
             stage->program = std::make_unique<Program>();
             stage->spec.info = &stage->program->info;
@@ -1299,7 +1526,7 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
             if (!stage->module) {
                 stage->merged = true; // unusable: info stays null
             }
-        }
+        });
         entry.stages[i] = stage;
     }
     entry.queued = std::chrono::steady_clock::now();
@@ -1449,9 +1676,11 @@ void PipelineCache::PumpWarmUp() {
     if (warm.reading || !warm.read.Empty() || !warm.pool->Idle() || !warm.built.Empty()) {
         return;
     }
-    std::printf("Pipeline warm-up: %u of %u pipelines in %.2f s in the background (%u threads)\n",
+    std::printf("Pipeline warm-up: %u of %u pipelines in %.2f s in the background (%u threads, "
+                "%u reading), %u read first in the order of their last use\n",
                 warm.loaded, warm.total.load(),
-                std::chrono::duration<double>(now - warm.started).count(), warm.threads);
+                std::chrono::duration<double>(now - warm.started).count(), warm.threads,
+                warm.readers, warm.in_order.load());
     LOG_INFO(Render, "Preloaded {} pipelines in the background", warm.loaded);
     ReportPipelineBinaryCache();
     std::printf("Warm-up profile: reader wall %.3f s, entries %.3f s, shader IO/meta %.3f s, "
@@ -1481,6 +1710,103 @@ void PipelineCache::PumpWarmUp() {
     warm.finished = true;
     Gow3Overlay::SetBackgroundLoading(0, 0);
     Storage::DataBase::Instance().FinishPreload();
+}
+
+namespace {
+constexpr std::string_view WarmupOrderHeader = "gow3 warm-up order 1\n";
+} // namespace
+
+// gow3 25 Oct 2026: warmup-order.bin, a text file of PipelineKey blob names, one a line, the
+// pipelines used most recently first.
+std::vector<std::string> PipelineCache::ReadWarmupOrder() {
+    auto& db = Storage::DataBase::Instance();
+    std::vector<std::string> names;
+    if (!db.Exists(Storage::BlobType::ShaderProfile, "warmup-order")) {
+        return names;
+    }
+    std::vector<u8> data;
+    db.Load(Storage::BlobType::ShaderProfile, "warmup-order", data);
+    const std::string_view text{reinterpret_cast<const char*>(data.data()), data.size()};
+    if (!text.starts_with(WarmupOrderHeader)) {
+        return names;
+    }
+    for (size_t at = WarmupOrderHeader.size(); at < text.size();) {
+        const size_t end = std::min(text.find('\n', at), text.size());
+        if (end > at) {
+            names.emplace_back(text.substr(at, end - at));
+        }
+        at = end + 1;
+    }
+    return names;
+}
+
+void PipelineCache::NoteWarmupOrder() {
+    // Every 4096 lookups a clock read; a save a minute after the warm-up and every minute on.
+    if ((++warm_order_calls & 4095) != 0 || (background && !background->finished)) {
+        return;
+    }
+    auto& db = Storage::DataBase::Instance();
+    if (!db.IsOpened() || !db.ConcurrentReads()) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (warm_order_saved == std::chrono::steady_clock::time_point{}) {
+        warm_order_saved = now;
+        return;
+    }
+    if (now - warm_order_saved < std::chrono::seconds(60)) {
+        return;
+    }
+    warm_order_saved = now;
+    SaveWarmupOrder();
+}
+
+void PipelineCache::SaveWarmupOrder() {
+    const auto started = std::chrono::steady_clock::now();
+    if (!previous_warm_order_read) {
+        previous_warm_order = ReadWarmupOrder();
+        previous_warm_order_read = true;
+    }
+    std::vector<std::pair<u64, std::string>> used;
+    used.reserve(graphics_pipelines.size() + compute_pipelines.size());
+    for (const auto& [key, pipeline] : graphics_pipelines) {
+        if (pipeline && pipeline->last_use) {
+            used.emplace_back(pipeline->last_use,
+                              fmt::format("g_{:#018x}", std::hash<GraphicsPipelineKey>{}(key)));
+        }
+    }
+    for (const auto& [key, pipeline] : compute_pipelines) {
+        if (pipeline && pipeline->last_use) {
+            used.emplace_back(pipeline->last_use, fmt::format("c_{:#018x}", key.value));
+        }
+    }
+    std::ranges::stable_sort(used, std::greater{}, &std::pair<u64, std::string>::first);
+    // The ones this session did not use keep their place after it.
+    std::unordered_set<std::string_view> listed;
+    std::string text{WarmupOrderHeader};
+    for (const auto& [tick, name] : used) {
+        if (listed.insert(name).second) {
+            text += name;
+            text += '\n';
+        }
+    }
+    u32 kept = 0;
+    for (const auto& name : previous_warm_order) {
+        if (listed.insert(name).second) {
+            text += name;
+            text += '\n';
+            ++kept;
+        }
+    }
+    Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "warmup-order",
+                                       std::vector<u8>(text.begin(), text.end()));
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        std::printf("Pipeline warm-up order: %zu used this session, %u kept from before (%.1f ms; "
+                    "saved every minute)\n",
+                    used.size(), kept, ElapsedNs(started) / 1e6);
+    }
 }
 
 void PipelineCache::StopWarmUp() {

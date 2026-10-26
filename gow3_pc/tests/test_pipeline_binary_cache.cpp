@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <chrono>
@@ -181,6 +182,61 @@ void TestDriverFallback(const std::filesystem::path& root) {
     dispatch = original;
 }
 
+// gow3 25 Oct 2026: large binaries are stored once and referenced (version 2 files).
+void TestSharedStore(const std::filesystem::path& directory) {
+    using namespace Vulkan::PipelineBinaryCache;
+    const Key global{1, 2}, pipeline{3, 4};
+    std::vector<u8> big(SharedMinSize + 3);
+    for (size_t i = 0; i < big.size(); ++i) {
+        big[i] = u8(i * 7 + 1);
+    }
+    std::vector<Binary> binaries{{{5}, {6, 7}}, {{9}, big}};
+    assert(HasLargeInline(binaries));
+    assert(StoreShared(directory, binaries));
+    assert(!HasLargeInline(binaries));
+    assert(binaries[0].data.size() == 2 && !binaries[0].shared_hash);
+    assert(binaries[1].data.empty() && binaries[1].shared && binaries[1].shared_hash);
+    assert(std::ranges::equal(binaries[1].Bytes(), big));
+    const auto encoded = Encode(global, pipeline, 0, binaries);
+    assert(encoded.size() > 8 && encoded.size() < 128 && encoded[4] == 2);
+    const auto decoded = Decode(encoded, global, pipeline, 0);
+    assert(decoded && (*decoded)[1].shared_hash == binaries[1].shared_hash &&
+           (*decoded)[1].shared_size == big.size() && !(*decoded)[1].shared);
+    assert(Save(directory / "a.bin", encoded));
+    const auto loaded = Load(directory / "a.bin", global, pipeline, 0);
+    assert(loaded && std::ranges::equal((*loaded)[1].Bytes(), big) &&
+           (*loaded)[0].data == binaries[0].data);
+    // A second pipeline with the same binary adds no stored copy.
+    std::vector<Binary> other{{{9}, big}};
+    assert(StoreShared(directory, other) && other[0].shared_hash == binaries[1].shared_hash);
+    const auto blobs = [&] {
+        unsigned count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(directory / "shared")) {
+            count += entry.path().extension() == ".blob";
+        }
+        return count;
+    };
+    assert(blobs() == 1);
+    // A reference to a binary that is missing, or stored damaged, is a miss; the damaged copy
+    // is removed so the next save writes it again.
+    std::vector<Binary> missing{{{8}, {}}};
+    missing[0].shared_size = 4;
+    missing[0].shared_hash = 0x1234;
+    assert(Save(directory / "b.bin", Encode(global, pipeline, 0, missing)));
+    assert(!Load(directory / "b.bin", global, pipeline, 0));
+    const auto damaged = directory / "shared" / "08_0000000000001234.blob";
+    {
+        std::ofstream out(damaged, std::ios::binary);
+        out << "abcd";
+    }
+    assert(!Load(directory / "b.bin", global, pipeline, 0));
+    assert(!std::filesystem::exists(damaged));
+    // Small binaries stay inline, in a version 1 file.
+    std::vector<Binary> small{{{5}, {6, 7}}};
+    assert(StoreShared(directory, small) && !small[0].shared_hash);
+    assert(Encode(global, pipeline, 0, small)[4] == 1);
+}
+
 void TestRealDriver(const std::filesystem::path& directory) {
     Vulkan::Instance instance(0, false);
     static vk::detail::DynamicLoader loader;
@@ -294,7 +350,7 @@ int main(int argc, char** argv) {
         std::memcpy(bytes.data() + bytes.size() - 8, &checksum, 8);
         assert(!Decode(bytes, global, pipeline, 42));
     };
-    malformed(4, 2);   // Unsupported version, with a valid checksum.
+    malformed(4, 3);   // Unsupported version, with a valid checksum.
     malformed(16, 33); // Global key exceeds Vulkan's bound.
     malformed(28, MaxBinaries + 1);
     malformed(37, u32(MaxFileSize + 1)); // Binary data length must be bounded.
@@ -334,6 +390,7 @@ int main(int argc, char** argv) {
         corrupt << "broken";
     }
     assert(!Load(file, global, pipeline, 42));
+    TestSharedStore(root / "shared-test");
     TestDriverFallback(root / "driver");
     std::filesystem::remove_all(root);
     std::puts("pipeline-binary-cache-test: passed");

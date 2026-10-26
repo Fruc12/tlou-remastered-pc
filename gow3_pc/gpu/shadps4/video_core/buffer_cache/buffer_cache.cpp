@@ -285,6 +285,43 @@ static std::string GpuWriterName(u64 writer) {
     return fmt::format("{:08x}:{}", writer >> 8, writer & 0xff);
 }
 
+// gow3 26 Oct 2026 diagnostics (GOW3_FAULT_STATS=1): uploads of guest memory, for a binding the
+// GPU only reads, over bytes the GPU wrote (gpu_modified_ranges): the GPU then reads the guest's
+// copy instead of its own output. By the newest recorded writer of those bytes, per 5 s. (It
+// relies on gpu_modified_ranges: the hair's state lost through RangeSet never showed here.)
+static void NoteUploadOverGpu(VAddr address, u64 size, u64 gpu_bytes, u64 writer) {
+    struct Entry {
+        u32 pieces = 0;
+        u64 bytes = 0, gpu_bytes = 0;
+        VAddr example = 0;
+        u64 example_size = 0;
+    };
+    static std::mutex mutex;
+    static std::map<u64, Entry> by_writer;
+    static auto last = std::chrono::steady_clock::now();
+    std::scoped_lock lock{mutex};
+    auto& entry = by_writer[writer];
+    ++entry.pieces;
+    entry.bytes += size;
+    entry.gpu_bytes += gpu_bytes;
+    entry.example = address;
+    entry.example_size = size;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(5)) {
+        return;
+    }
+    last = now;
+    std::string text;
+    for (const auto& [who, e] : by_writer) {
+        text += fmt::format(" {} x{} ({} of {} bytes GPU-written, last {:#x}+{});",
+                            GpuWriterName(who), e.pieces, e.gpu_bytes, e.bytes, e.example,
+                            e.example_size);
+    }
+    std::printf("Uploads over GPU-written bytes for read bindings (5 s):%s\n", text.c_str());
+    std::fflush(stdout);
+    by_writer.clear();
+}
+
 struct WaitWriter {
     u32 waits = 0;
     VAddr example = 0;
@@ -645,7 +682,15 @@ BufferCache::~BufferCache() = default;
 // Rasterizer::UnmapMemory's timing line (a cutscene hitch).
 std::atomic<u64> g_invalidate_downloads{0}, g_invalidate_download_ns{0};
 
+static bool FaultTimesEnabled(); // GOW3_FAULT_TIMES, defined with the fault statistics
+// gow3 26 Oct 2026 (GOW3_FAULT_TIMES): when this thread's InvalidateMemory started (the
+// tracker's region lock comes before ReadMemory).
+static thread_local std::chrono::steady_clock::time_point t_invalidate_start;
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
+    if (FaultTimesEnabled()) {
+        t_invalidate_start = std::chrono::steady_clock::now();
+    }
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         const auto start = std::chrono::steady_clock::now();
         ReadMemory(device_addr, size, true, assume_locks);
@@ -774,6 +819,21 @@ static std::atomic<u32> g_readback_read_waits;
 static std::atomic<u32> g_read_on_gpu_bytes, g_read_same_page;
 static std::atomic<u32> g_read_no_gpu_bytes; // gow3 25 Oct 2026: read faults beside no GPU bytes
 static std::atomic<u32> g_poisoned_page_writes; // gow3 25 Oct 2026: writes a poisoned page took
+static bool FaultTimesEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_FAULT_TIMES");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+static thread_local std::string t_write_fault_note;
+std::string BufferCache::TakeWriteFaultNote() {
+    return std::exchange(t_write_fault_note, {});
+}
+// gow3 26 Oct 2026 diagnostics (GOW3_FAULT_STATS=1): second-queue copies (SideQueueFetch) and
+// the time their submitters waited for them, in microseconds.
+static std::atomic<u32> g_side_fetches, g_side_fetch_max_us;
+static std::atomic<u64> g_side_fetch_us;
 static std::atomic<u32> g_label_backing_reads;  // gow3 25 Oct 2026: BufferCache::ReadWaitLabel
 static std::atomic<u32> g_pieces_recurring, g_pieces_protected;
 static std::atomic<u64> g_readback_bytes;
@@ -964,6 +1024,9 @@ static bool LazyWritesEnabled() {
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
+    const auto entered = FaultTimesEnabled() ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
+    const auto invalidate_start = std::exchange(t_invalidate_start, {}); // taken: not from an older fault
     // gow3: GOW3_FAULT_STATS=1 — every GPU-to-guest download request (CPU read of GPU data,
     // or CPU write into GPU-written memory), by 1 MiB window, every 5 s.
     static const bool stats = [] {
@@ -973,14 +1036,21 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     {
         if (stats) {
             static std::mutex mutex;
-            static std::unordered_map<u64, u32> windows;
-            static u32 reads, writes;
+            static std::unordered_map<u64, u32> counted_windows;
+            static u32 counted_reads, counted_writes;
             static auto last = std::chrono::steady_clock::now();
-            std::scoped_lock lock{mutex};
-            ++windows[(device_addr >> 20) | (is_write ? 1ULL << 40 : 0)];
-            ++(is_write ? writes : reads);
+            std::unique_lock lock{mutex};
+            ++counted_windows[(device_addr >> 20) | (is_write ? 1ULL << 40 : 0)];
+            ++(is_write ? counted_writes : counted_reads);
             if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds{5}) {
                 last = now;
+                // gow3 26 Oct 2026: printed without the lock. Every fault request takes it, and
+                // the summary held it ~25 ms: faults of other threads arriving meanwhile (the
+                // hair's joint slots of The Last of Us among them) waited for it.
+                const auto windows = std::exchange(counted_windows, {});
+                const u32 reads = std::exchange(counted_reads, 0);
+                const u32 writes = std::exchange(counted_writes, 0);
+                lock.unlock();
                 std::vector<std::pair<u32, u64>> sorted;
                 for (const auto& [key, n] : windows) {
                     sorted.emplace_back(n, key);
@@ -1028,6 +1098,14 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 }
                 std::printf("  pages with old GPU bytes fetched on the second queue: %u\n",
                             g_old_byte_fetches.exchange(0));
+                {
+                    const u32 fetches = g_side_fetches.exchange(0);
+                    const double waited_ms = g_side_fetch_us.exchange(0) / 1e3;
+                    std::printf("  second-queue copies: %u, waited for %.1f ms (%.2f ms each, %.2f "
+                                "at most)\n",
+                                fetches, waited_ms, fetches ? waited_ms / fetches : 0.0,
+                                g_side_fetch_max_us.exchange(0) / 1e3);
+                }
                 std::printf("  page fetches refused: lazy page %u, pending readback %u, no GPU write "
                             "tick %u, written in the open command buffer %u\n",
                             g_fetch_refused[0].exchange(0), g_fetch_refused[1].exchange(0),
@@ -1146,8 +1224,6 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     }
                 }
                 std::fflush(stdout);
-                windows.clear();
-                reads = writes = 0;
             }
         }
     }
@@ -1172,7 +1248,14 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }();
     u64 deferred_tick = 0;
     bool allow_defer = no_block && is_write && !assume_locks;
-    const auto flush_request = [this, device_addr, size, is_write, &deferred_tick, &allow_defer] {
+    // gow3 26 Oct 2026 diagnostics (GOW3_FAULT_TIMES=1): how the request ended, and when the GPU
+    // command thread took it (TakeWriteFaultNote).
+    const char* path = "";
+    const char* wait_note = "";
+    std::chrono::steady_clock::time_point started{};
+    const auto flush_request = [this, device_addr, size, is_write, &deferred_tick, &allow_defer,
+                                &path, &wait_note, &started] {
+        started = std::chrono::steady_clock::now();
         if (!is_write && FaultStatsEnabled() && gpu_modified_ranges.Intersects(device_addr, size)) {
             std::scoped_lock lock{g_writers_mutex};
             auto& [reads, addresses] = g_gpu_byte_reads[device_addr >> 20];
@@ -1310,6 +1393,8 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // The newest GPU data of the written bytes is on its way back: wait for that
             // readback only, not for all GPU work.
             if (const u64 tick = PendingReadbackTick(device_addr, size, true)) {
+                wait_note = lazy_pages.contains(page) ? "readback waited (shared page), "
+                                                      : "readback waited, ";
                 ++g_readback_waits;
                 static std::atomic<u32> described{0};
                 if (described.fetch_add(1) < 24) {
@@ -1337,6 +1422,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 lazy_pages.erase(page);
                 memory_tracker->UnmarkRegionAsGpuModified(page, 4096);
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                path = "clean";
                 return;
             }
             // Diagnostics: GOW3_SHARED_WRITES=0 turns the shared path below off (the write
@@ -1454,6 +1540,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 !gpu_modified_ranges.Intersects(device_addr, size)) {
                 share_page(shared_readbacks);
                 g_shared_finished_writes.fetch_add(1, std::memory_order_relaxed);
+                path = "shared beside final GPU bytes";
                 return;
             }
             // gow3 17 Oct 2026: the page's GPU bytes are final (the last GPU write into its 1 MiB
@@ -1519,6 +1606,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             if (batch_mapped && batch_window && arena_host_mapped && instance.GetCopyQueue() &&
                 other_finished_page() && CopyFinishedGpuPage(page)) {
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                path = "batched copy";
                 return;
             }
             // gow3 21 Oct 2026 (GOW3_FETCH_NO_BLOCK=1): the second-queue copy below would wait for
@@ -1586,18 +1674,21 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                         } else if (share_poisoned()) {
                             g_shared_unfinished_writes.fetch_add(1, std::memory_order_relaxed);
                             NoteShareCheck(page, 1);
+                            path = "shared poisoned beside running GPU writes";
                             return;
                         }
                     }
                     if (!semaphore->IsFree(tick)) {
                         deferred_tick = tick;
                         NoteShareCheck(page, 0);
+                        path = "deferred";
                         return;
                     }
                 }
             }
             if (ReadFinishedGpuPage(page) || CopyFinishedGpuPage(page, allow_defer)) {
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                path = "copied";
                 return;
             }
             // gow3: the GPU bytes in this page come from work still in flight (recorded in this
@@ -1616,6 +1707,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             if (shared_writes && !gpu_modified_ranges.Intersects(device_addr, size)) {
                 if (GpuBytesInFlight(page)) {
                     share_page(shared_readbacks);
+                    path = "shared beside GPU bytes in flight";
                     return;
                 }
             }
@@ -1631,9 +1723,11 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                 g_poisoned_page_writes.fetch_add(1, std::memory_order_relaxed);
                 NotePoisonEvent(page, gpu_modified_ranges.Intersects(device_addr, size) ? "write-into"
                                                                                           : "write-beside");
+                path = "poisoned shared page, went ahead";
                 return;
             }
             if (TryLazyWrite(device_addr, size)) {
+                path = "lazy write";
                 return;
             }
             // gow3 20 Oct 2026 (integrated GPUs): without a second queue of the graphics family
@@ -1654,11 +1748,13 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     if (ReadFinishedGpuPage(page)) {
                         ++g_waited_page_reads;
                         memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                        path = "waited page read";
                         return;
                     }
                 }
             }
         }
+        path = "full download";
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
         const auto* arena = GetArena(first_block, last_block);
@@ -1696,25 +1792,55 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     };
     if (assume_locks) {
         flush_request();
+        if (is_write && FaultTimesEnabled()) {
+            t_write_fault_note = fmt::format("{}{}", wait_note, path);
+        }
     } else {
         const auto queued = std::chrono::steady_clock::now();
         // gow3 21 Oct 2026: a fault request (GOW3_WAIT_SERVICES_FAULTS=1: the command thread's
         // frames-ahead wait serves it too; otherwise SendCommand<true> as before).
         liverpool->SendFaultCommand(flush_request);
+        // (GOW3_FAULT_TIMES) the time the request waited for the command thread, the time it
+        // ran there, the deferred GPU waits.
+        using Ms = std::chrono::duration<double, std::milli>;
+        const auto request_done = std::chrono::steady_clock::now();
+        double queue_ms = Ms(started - queued).count();
+        double run_ms = Ms(request_done - started).count();
+        double defer_ms = 0.0;
         // gow3 21 Oct 2026 (GOW3_FETCH_NO_BLOCK=1): the GPU write the fetch needs finished is
         // waited for here; the request starts over (the page may have changed meanwhile). After
         // three such waits the old path (the command thread waits) ends it.
+        u32 deferrals = 0;
         for (u32 attempt = 1; deferred_tick; ++attempt) {
             const u64 tick = std::exchange(deferred_tick, 0);
+            const auto wait_start = std::chrono::steady_clock::now();
             scheduler.GetWorkSemaphore()->Wait(tick);
+            const auto resent = std::chrono::steady_clock::now();
+            defer_ms += Ms(resent - wait_start).count();
             allow_defer = attempt < 3;
             g_fetch_deferrals.fetch_add(1, std::memory_order_relaxed);
             liverpool->SendFaultCommand(flush_request);
+            queue_ms += Ms(started - resent).count();
+            run_ms += Ms(std::chrono::steady_clock::now() - started).count();
+            ++deferrals;
         }
         if (!is_write) {
             g_read_queue_us += std::chrono::duration_cast<std::chrono::microseconds>(
                                    std::chrono::steady_clock::now() - queued)
                                    .count();
+        } else if (FaultTimesEnabled()) {
+            // Before the request: the tracker's region lock (InvalidateRegion), then the
+            // statistics above.
+            const double tracker_ms = invalidate_start.time_since_epoch().count()
+                                          ? Ms(entered - invalidate_start).count()
+                                          : 0.0;
+            t_write_fault_note = fmt::format(
+                "{}{}{}; tracker lock {:.2f} ms, stats {:.2f} ms, command thread queue {:.2f} ms, "
+                "ran {:.2f} ms{}",
+                wait_note, path,
+                deferrals ? fmt::format(" after {} deferral(s)", deferrals) : std::string{},
+                tracker_ms, Ms(queued - entered).count(), queue_ms, run_ms,
+                deferrals ? fmt::format(", GPU waits {:.2f} ms", defer_ms) : std::string{});
         }
     }
 }
@@ -2640,6 +2766,864 @@ void BufferCache::PeekGpuBuffer(const Buffer* source, u64 offset, VAddr address,
                      address, size, tag, slot,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                      dispatch, phase});
+}
+
+// gow3 26 Oct 2026 diagnostics (GOW3_BONE_TRACE=1): see buffer_cache.h.
+bool BufferCache::BoneTraceEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_BONE_TRACE");
+        const bool enabled = env && (env[0] == '1' || env[0] == '2');
+        if (enabled) {
+            std::printf("GPU: %s (GOW3_BONE_TRACE=%c)\n",
+                        env[0] == '2' ? "the skinning's vertex outputs are watched for stretches, "
+                                        "with the bones they read (light trace)"
+                                      : "the skinning's bone bindings (cs 45df1f62) are checked "
+                                        "against guest memory once the GPU has run them",
+                        env[0]);
+            std::fflush(stdout);
+        }
+        return enabled;
+    }();
+    return on;
+}
+
+// GOW3_BONE_TRACE=2: the hair watch and the bones of slots 6 and 7 only (what the skinning read,
+// not checked against guest memory); no copies of the physics shader's bindings.
+bool BufferCache::BoneTraceLight() {
+    static const bool light = [] {
+        const char* env = std::getenv("GOW3_BONE_TRACE");
+        return env && env[0] == '2';
+    }();
+    return light;
+}
+
+static s64 TraceUs() {
+    static const auto t0 = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
+        .count();
+}
+struct TracedFault {
+    VAddr address = 0;
+    s64 start_us = 0, end_us = 0;
+    std::string note;
+};
+struct TracedJointWrite {
+    VAddr address = 0;
+    u64 size = 0;
+    u32 slot = 0;
+    u64 tick = 0;
+    s64 us = 0;
+};
+static std::mutex g_trace_mutex;
+static std::array<TracedFault, 4096> g_traced_faults;
+static u32 g_traced_fault_next = 0;
+static std::array<TracedJointWrite, 1024> g_traced_joint_writes;
+static u32 g_traced_joint_next = 0;
+
+void BufferCache::NoteTracedFault(VAddr address, u64 total_ns, const std::string& note) {
+    const s64 end = TraceUs();
+    std::scoped_lock lock{g_trace_mutex};
+    auto& entry = g_traced_faults[g_traced_fault_next++ % g_traced_faults.size()];
+    entry.address = address;
+    entry.start_us = end - static_cast<s64>(total_ns / 1000);
+    entry.end_us = end;
+    entry.note = note;
+}
+
+void BufferCache::NoteJointWrite(VAddr address, u64 size, u32 slot, u64 tick) {
+    const s64 now = TraceUs();
+    std::scoped_lock lock{g_trace_mutex};
+    g_traced_joint_writes[g_traced_joint_next++ % g_traced_joint_writes.size()] = {address, size, slot,
+                                                                                   tick, now};
+}
+
+void BufferCache::PeekBones(const Buffer* source, u64 offset, VAddr address, u64 size, u32 slot,
+                            u64 dispatch, u64 shader, bool written) {
+    // The earlier ones the GPU has run are checked first: as soon as possible after the GPU ran
+    // them (a later check takes the game's writes after that, harmless, for late ones).
+    PollBonePeeks();
+    if (!source || size == 0 || size > 16_KB || bone_peeks.size() > 1024) {
+        return;
+    }
+    const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostCached, 0, true);
+    const vk::BufferCopy copy = {
+        .srcOffset = offset,
+        .dstOffset = staging.offset,
+        .size = size,
+    };
+    runtime.CopyBuffer(source, staging.buffer, std::span{&copy, 1});
+    BonePeek peek{
+        .tick = scheduler.CurrentTick(),
+        .buffer = staging.buffer,
+        .offset = staging.offset,
+        .staging_size = staging.size,
+        .mapped = staging.mapped,
+        .address = address,
+        .size = size,
+        .slot = slot,
+        .bound_us = TraceUs(),
+        .dispatch = dispatch,
+        .shader = shader,
+        .written = written,
+        .source = source,
+        .source_offset = offset,
+    };
+    // GOW3_BONE_TRACE=2: only what the skinning read is kept (for the bone changes of the hair
+    // watch), not checked against guest memory.
+    if (!BoneTraceLight()) {
+        peek.guest.resize(size);
+        if (!memory->TryReadBacking(address, peek.guest.data(), size)) {
+            memory->CopySparseMemory(address, peek.guest.data(), size);
+        }
+        peek.gpu_owned.assign(size, 0);
+        gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr lo, VAddr hi) {
+            for (VAddr byte = lo; byte < hi; ++byte) {
+                peek.gpu_owned[byte - address] = 1;
+            }
+        });
+        peek.pending_readback = PendingReadbackTick(address, size, false) != 0;
+        peek.shared = lazy_pages.contains(Common::AlignDown(address, LAZY_PAGE_SIZE)) ||
+                      lazy_pages.contains(Common::AlignDown(address + size - 1, LAZY_PAGE_SIZE));
+        peek.result_page = IsResultPage(Common::AlignDown(address, LAZY_PAGE_SIZE)) ||
+                           IsResultPage(Common::AlignDown(address + size - 1, LAZY_PAGE_SIZE));
+    }
+    bone_peeks.push_back(std::move(peek));
+    if (written) {
+        // (A deque's push_back and pop_front keep references to the other elements.)
+        bone_peeks_after.push_back(&bone_peeks.back());
+    }
+}
+
+void BufferCache::PeekBonesAfter() {
+    for (BonePeek* peek : bone_peeks_after) {
+        const auto staging = staging_pool.Request(peek->size, VideoCore::MemoryType::HostCached, 0, true);
+        const vk::BufferCopy copy = {
+            .srcOffset = peek->source_offset,
+            .dstOffset = staging.offset,
+            .size = peek->size,
+        };
+        runtime.CopyBuffer(peek->source, staging.buffer, std::span{&copy, 1});
+        peek->post_buffer = staging.buffer;
+        peek->post_offset = staging.offset;
+        peek->post_staging_size = staging.size;
+        peek->post_mapped = staging.mapped;
+    }
+    bone_peeks_after.clear();
+}
+
+void BufferCache::PeekSkinOutput(const Buffer* source, u64 offset, VAddr address, u64 size,
+                                 u64 dispatch) {
+    if (!source || size == 0 || size > 256_KB || size % 52 != 0 || skin_peeks.size() > 512) {
+        return;
+    }
+    const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostCached, 0, true);
+    const vk::BufferCopy copy = {
+        .srcOffset = offset,
+        .dstOffset = staging.offset,
+        .size = size,
+    };
+    runtime.CopyBuffer(source, staging.buffer, std::span{&copy, 1});
+    skin_peeks.push_back({scheduler.CurrentTick(), staging.buffer, staging.offset, staging.size,
+                          staging.mapped, address, size, dispatch, TraceUs()});
+}
+
+// The positions (the first 3 floats of each 52-byte vertex) against the previous output of the
+// same buffer: the extent of the mesh and how far vertices moved. A stretch: the extent or a
+// vertex's move well past what that buffer usually shows.
+void BufferCache::CheckSkinOutput(const SkinPeek& peek) {
+    struct History {
+        std::vector<float> previous;
+        std::deque<float> extents, jumps;
+        u64 previous_dispatch = 0;
+    };
+    static std::map<std::pair<VAddr, u64>, History> history;
+    static u32 checked = 0, spikes = 0;
+    static auto last = std::chrono::steady_clock::now();
+    static u32 printed = 0;
+    const u64 count = peek.size / 52;
+    std::vector<float> positions(count * 3);
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    u64 finite = 0;
+    for (u64 v = 0; v < count; ++v) {
+        float p[3];
+        std::memcpy(p, peek.mapped + v * 52, 12);
+        bool ok = true;
+        for (int k = 0; k < 3; ++k) {
+            ok &= std::isfinite(p[k]) && std::abs(p[k]) < 1e5f;
+        }
+        for (int k = 0; k < 3; ++k) {
+            positions[v * 3 + k] = ok ? p[k] : 0.0f;
+            if (ok) {
+                lo[k] = std::min(lo[k], p[k]);
+                hi[k] = std::max(hi[k], p[k]);
+            }
+        }
+        finite += ok;
+    }
+    if (finite == 0) {
+        return;
+    }
+    const float extent = std::sqrt((hi[0] - lo[0]) * (hi[0] - lo[0]) + (hi[1] - lo[1]) * (hi[1] - lo[1]) +
+                                   (hi[2] - lo[2]) * (hi[2] - lo[2]));
+    auto& h = history[{peek.address, peek.size}];
+    float max_jump = 0.0f;
+    u64 max_vertex = 0;
+    if (h.previous.size() == positions.size()) {
+        for (u64 v = 0; v < count; ++v) {
+            const float dx = positions[v * 3] - h.previous[v * 3];
+            const float dy = positions[v * 3 + 1] - h.previous[v * 3 + 1];
+            const float dz = positions[v * 3 + 2] - h.previous[v * 3 + 2];
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d > max_jump) {
+                max_jump = d;
+                max_vertex = v;
+            }
+        }
+    }
+    const auto median = [](const std::deque<float>& values) {
+        std::vector<float> sorted(values.begin(), values.end());
+        std::ranges::sort(sorted);
+        return sorted.empty() ? 0.0f : sorted[sorted.size() / 2];
+    };
+    ++checked;
+    // The median change of the bones' 16-byte rows (slots 6 and 7) since the previous skinning
+    // of this buffer, for every check: how often the bones jump as a whole.
+    static std::array<std::array<u32, 4>, 2> row_change{}; // [slot 6/7][<0.05, <0.2, <1, more]
+    static std::array<std::array<u32, 4>, 2> row_change_stretched{};
+    const auto slot_change = [&](u32 slot) -> float {
+        const std::vector<BoneRange>* now_ranges = nullptr;
+        const std::vector<BoneRange>* before_ranges = nullptr;
+        for (const auto& [d, ranges] : recent_bone_ranges) {
+            if (d == peek.dispatch) {
+                now_ranges = &ranges;
+            } else if (d == h.previous_dispatch) {
+                before_ranges = &ranges;
+            }
+        }
+        if (!now_ranges || !before_ranges) {
+            return -1.0f;
+        }
+        for (const auto& range : *now_ranges) {
+            for (const auto& old_range : *before_ranges) {
+                if (range.slot != slot || old_range.slot != slot || range.read.empty() ||
+                    old_range.read.size() != range.read.size()) {
+                    continue;
+                }
+                std::vector<float> rows;
+                for (u32 r = 0; r < range.read.size() / 16; ++r) {
+                    float a[4], b[4], d = 0.0f;
+                    std::memcpy(a, range.read.data() + r * 16, 16);
+                    std::memcpy(b, old_range.read.data() + r * 16, 16);
+                    for (int k = 0; k < 4; ++k) {
+                        if (std::isfinite(a[k]) && std::isfinite(b[k])) {
+                            d = std::max(d, std::abs(a[k] - b[k]));
+                        }
+                    }
+                    rows.push_back(d);
+                }
+                if (rows.empty()) {
+                    return -1.0f;
+                }
+                std::ranges::nth_element(rows, rows.begin() + rows.size() / 2);
+                return rows[rows.size() / 2];
+            }
+        }
+        return -1.0f;
+    };
+    const float change6 = slot_change(6), change7 = slot_change(7);
+    const auto bucket = [](float c) { return c < 0.05f ? 0 : c < 0.2f ? 1 : c < 1.0f ? 2 : 3; };
+    bool stretched_now = false;
+    if (h.extents.size() >= 8) {
+        const float usual_extent = median(h.extents);
+        const float usual_jump = median(h.jumps);
+        // The whole mesh jumping (a camera cut, a teleport) moves every vertex: only a stretch
+        // grows the extent too.
+        const bool stretched = extent > usual_extent * 1.3f && extent - usual_extent > 0.02f &&
+                               max_jump > std::max(usual_jump * 4.0f, usual_extent * 0.2f);
+        stretched_now = stretched;
+        if (stretched) {
+            ++spikes;
+            // A frame dump (GOW3_FRAME_DUMP_TRIGGER, probe_tlou.py --capture) of the next frame
+            // shown, to see the stretch: at most 12, a second apart.
+            static const char* dump_trigger = std::getenv("GOW3_FRAME_DUMP_TRIGGER");
+            static u32 dumps = 0;
+            static s64 last_dump_us = 0;
+            if (dump_trigger && dumps < 12 && TraceUs() - last_dump_us > 1'000'000) {
+                ++dumps;
+                last_dump_us = TraceUs();
+                if (std::FILE* f = std::fopen(dump_trigger, "wb")) {
+                    std::fclose(f);
+                }
+                std::printf("Hair watch: frame dump %u requested at %.3f s\n", dumps, last_dump_us / 1e6);
+            }
+            if (printed < 200) {
+                ++printed;
+                std::string bones = " (not kept)";
+                for (const auto& [dispatch, text] : recent_bone_reads) {
+                    if (dispatch == peek.dispatch) {
+                        bones = text;
+                    }
+                }
+                // The physics writes into each bone binding around the skinning's bind, by time
+                // and tick: one recorded after the skinning (or in a later tick) means the
+                // skinning read the slot before the physics wrote it this frame.
+                std::string order;
+                for (const auto& [dispatch, ranges] : recent_bone_ranges) {
+                    if (dispatch != peek.dispatch) {
+                        continue;
+                    }
+                    for (const auto& range : ranges) {
+                        if (range.slot != 6 && range.slot != 7) {
+                            continue;
+                        }
+                        std::vector<std::pair<s64, std::string>> writes;
+                        {
+                            std::scoped_lock lock{g_trace_mutex};
+                            for (const auto& w : g_traced_joint_writes) {
+                                if (w.us && w.address < range.address + range.size &&
+                                    range.address < w.address + w.size &&
+                                    w.us >= range.bound_us - 300'000 && w.us <= range.bound_us + 300'000) {
+                                    writes.emplace_back(w.us, fmt::format(" {:+.1f} ms tick {} (slot {})",
+                                                                          (w.us - range.bound_us) / 1e3,
+                                                                          w.tick, w.slot));
+                                }
+                            }
+                        }
+                        std::ranges::sort(writes);
+                        order += fmt::format(" [bones slot {} {:#x} bound at tick {}; physics writes:",
+                                             range.slot, range.address, range.tick);
+                        for (const auto& [t, text] : writes) {
+                            order += text;
+                        }
+                        order += writes.empty() ? " none]" : "]";
+                    }
+                }
+                bones += order;
+                bones += PhysicsInputDiff(peek.dispatch, h.previous_dispatch);
+                // The bones it read against those the previous skinning of this buffer read:
+                // the 16-byte rows (a matrix row) that changed most.
+                const auto find_ranges = [&](u64 dispatch) -> const std::vector<BoneRange>* {
+                    for (const auto& [d, ranges] : recent_bone_ranges) {
+                        if (d == dispatch) {
+                            return &ranges;
+                        }
+                    }
+                    return nullptr;
+                };
+                const auto* now_ranges = find_ranges(peek.dispatch);
+                const auto* before_ranges = find_ranges(h.previous_dispatch);
+                if (now_ranges && before_ranges) {
+                    for (const auto& range : *now_ranges) {
+                        for (const auto& old_range : *before_ranges) {
+                            if (old_range.slot != range.slot || range.read.empty() ||
+                                old_range.read.size() != range.read.size()) {
+                                continue;
+                            }
+                            // Per 16-byte row: the largest change of its 4 floats.
+                            std::vector<std::pair<float, u32>> rows;
+                            const u32 n_rows = static_cast<u32>(range.read.size() / 16);
+                            float typical = 0.0f;
+                            for (u32 r = 0; r < n_rows; ++r) {
+                                float a[4], b[4], d = 0.0f;
+                                std::memcpy(a, range.read.data() + r * 16, 16);
+                                std::memcpy(b, old_range.read.data() + r * 16, 16);
+                                for (int k = 0; k < 4; ++k) {
+                                    if (std::isfinite(a[k]) && std::isfinite(b[k])) {
+                                        d = std::max(d, std::abs(a[k] - b[k]));
+                                    }
+                                }
+                                rows.emplace_back(d, r);
+                            }
+                            std::ranges::sort(rows, std::greater{});
+                            if (!rows.empty()) {
+                                typical = rows[rows.size() / 2].first;
+                            }
+                            bones += fmt::format(" [slot {} rows changed most since the last skinning "
+                                                 "of this buffer (median {:.4f}):",
+                                                 range.slot, typical);
+                            for (size_t i = 0; i < std::min<size_t>(rows.size(), 4); ++i) {
+                                float a[4];
+                                std::memcpy(a, range.read.data() + rows[i].second * 16, 16);
+                                bones += fmt::format(" row {} by {:.3f} ({:.3f} {:.3f} {:.3f} {:.3f})",
+                                                     rows[i].second, rows[i].first, a[0], a[1], a[2],
+                                                     a[3]);
+                            }
+                            bones += "]";
+                        }
+                    }
+                }
+                std::printf("Hair watch: at %.1f s, skinning output %#llx+%llu (dispatch %llu, tick "
+                            "%llu) stretched: extent %.3f (usually %.3f), vertex %llu moved %.3f "
+                            "(usually at most %.3f); its bone bindings:%s\n",
+                            TraceUs() / 1e6, static_cast<unsigned long long>(peek.address),
+                            static_cast<unsigned long long>(peek.size),
+                            static_cast<unsigned long long>(peek.dispatch),
+                            static_cast<unsigned long long>(peek.tick), extent, usual_extent,
+                            static_cast<unsigned long long>(max_vertex), max_jump, usual_jump,
+                            bones.c_str());
+                std::fflush(stdout);
+            }
+        }
+    }
+    // (GOW3_BONE_TRACE=1) the same physics comparison for a few unstretched hair skinnings.
+    static u32 baseline_printed = 0, baseline_count = 0;
+    if (!stretched_now && peek.size == 144300 && !BoneTraceLight() && baseline_printed < 4 &&
+        ++baseline_count % 200 == 0) {
+        ++baseline_printed;
+        std::printf("Hair watch: baseline, skinning output %#llx+%llu (dispatch %llu) not "
+                    "stretched:%s\n",
+                    static_cast<unsigned long long>(peek.address),
+                    static_cast<unsigned long long>(peek.size),
+                    static_cast<unsigned long long>(peek.dispatch),
+                    PhysicsInputDiff(peek.dispatch, h.previous_dispatch).c_str());
+        std::fflush(stdout);
+    }
+    for (u32 i = 0; i < 2; ++i) {
+        const float c = i == 0 ? change6 : change7;
+        if (c >= 0.0f) {
+            ++(stretched_now ? row_change_stretched : row_change)[i][bucket(c)];
+        }
+    }
+    h.extents.push_back(extent);
+    h.jumps.push_back(max_jump);
+    if (h.extents.size() > 31) {
+        h.extents.pop_front();
+        h.jumps.pop_front();
+    }
+    h.previous = std::move(positions);
+    h.previous_dispatch = peek.dispatch;
+    if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds{5}) {
+        last = now;
+        std::string text;
+        for (const auto& [key, entry] : history) {
+            if (!entry.extents.empty()) {
+                text += fmt::format(" {:#x}+{}: extent {:.3f}, move {:.3f};", key.first, key.second,
+                                    median(entry.extents), median(entry.jumps));
+            }
+        }
+        std::printf("Hair watch (5 s): %u skinning outputs checked, %u stretched; bones' median row "
+                    "change since the last skinning of the buffer (<0.05/<0.2/<1/more): slot 6 "
+                    "%u/%u/%u/%u, slot 7 %u/%u/%u/%u; when stretched: slot 6 %u/%u/%u/%u, slot 7 "
+                    "%u/%u/%u/%u; usual by buffer:%s\n",
+                    checked, spikes, row_change[0][0], row_change[0][1], row_change[0][2],
+                    row_change[0][3], row_change[1][0], row_change[1][1], row_change[1][2],
+                    row_change[1][3], row_change_stretched[0][0], row_change_stretched[0][1],
+                    row_change_stretched[0][2], row_change_stretched[0][3],
+                    row_change_stretched[1][0], row_change_stretched[1][1],
+                    row_change_stretched[1][2], row_change_stretched[1][3], text.c_str());
+        row_change = {};
+        row_change_stretched = {};
+        std::fflush(stdout);
+        checked = spikes = 0;
+        if (history.size() > 64) {
+            history.clear();
+        }
+    }
+}
+
+// The bytes a physics dispatch read from a binding against what the last physics dispatch wrote
+// there: the simulation's state lives in GPU memory from frame to frame, so a difference is
+// someone else changing it (the game resetting it, or an upload of guest memory over it).
+void BufferCache::CheckPhysicsState(const BonePeek& peek, const std::vector<u8>& guest_now) {
+    static u32 checked = 0, changed = 0, printed = 0;
+    static auto last = std::chrono::steady_clock::now();
+    const auto key = std::make_pair(peek.address, peek.size);
+    if (const auto it = last_physics_writes.find(key); it != last_physics_writes.end()) {
+        const auto& before = it->second.bytes;
+        u32 n = 0, first = 0, last_byte = 0, zero_now = 0, guest_equal = 0;
+        for (u64 i = 0; i < peek.size && i < before.size(); ++i) {
+            if (peek.mapped[i] != before[i]) {
+                if (n++ == 0) {
+                    first = static_cast<u32>(i);
+                }
+                last_byte = static_cast<u32>(i);
+                zero_now += peek.mapped[i] == 0;
+                // The read equals the guest's copy: guest memory went to the GPU (an upload).
+                guest_equal += !peek.guest.empty() && peek.mapped[i] == peek.guest[i];
+            }
+        }
+        ++checked;
+        if (n) {
+            ++changed;
+            if (printed < 40) {
+                ++printed;
+                std::string faults;
+                {
+                    std::scoped_lock lock{g_trace_mutex};
+                    std::vector<std::pair<s64, std::string>> list;
+                    for (const auto& f : g_traced_faults) {
+                        if (f.end_us && f.address >= Common::AlignDown(peek.address, 4096) &&
+                            f.address < Common::AlignUp(peek.address + peek.size, 4096) &&
+                            f.end_us >= it->second.us - 50'000 && f.start_us <= peek.bound_us) {
+                            list.emplace_back(f.start_us,
+                                              fmt::format(" [{:#x} {:+.1f} ms: {}]", f.address,
+                                                          (f.start_us - peek.bound_us) / 1e3, f.note));
+                        }
+                    }
+                    std::ranges::sort(list);
+                    for (const auto& [t, text] : list) {
+                        faults += text;
+                    }
+                }
+                u32 read_word = 0, before_word = 0, guest_word = 0;
+                const u32 word = first & ~3u;
+                if (word + 4 <= peek.size && word + 4 <= before.size()) {
+                    std::memcpy(&read_word, peek.mapped + word, 4);
+                    std::memcpy(&before_word, before.data() + word, 4);
+                    if (word + 4 <= peek.guest.size()) {
+                        std::memcpy(&guest_word, peek.guest.data() + word, 4);
+                    }
+                }
+                std::printf("Physics state: slot %u %#llx+%llu (tick %llu) read %u bytes unlike the last "
+                            "physics write there (tick %llu, %.1f ms before; offsets %#x-%#x, %u now "
+                            "zero, %u equal to the guest's copy at the bind; dword %#x: read %08x, "
+                            "written %08x, guest %08x); %s; CPU write faults on its pages since:%s\n",
+                            peek.slot, static_cast<unsigned long long>(peek.address),
+                            static_cast<unsigned long long>(peek.size),
+                            static_cast<unsigned long long>(peek.tick), n,
+                            static_cast<unsigned long long>(it->second.tick),
+                            (peek.bound_us - it->second.us) / 1e3, first, last_byte, zero_now,
+                            guest_equal, word, read_word, before_word, guest_word,
+                            peek.shared ? "shared page" : "not shared",
+                            faults.empty() ? " none" : faults.c_str());
+                std::fflush(stdout);
+            }
+        }
+    }
+    if (peek.written && peek.post_mapped) {
+        last_physics_writes[key] = {std::vector<u8>(peek.post_mapped, peek.post_mapped + peek.size),
+                                    peek.bound_us, peek.tick};
+        if (last_physics_writes.size() > 4096) {
+            last_physics_writes.clear();
+        }
+    }
+    if (const auto now = std::chrono::steady_clock::now(); checked && now - last >= std::chrono::seconds{5}) {
+        last = now;
+        std::printf("Physics state (5 s): %u reads of bindings the physics wrote before, %u of them "
+                    "unlike its last write\n",
+                    checked, changed);
+        std::fflush(stdout);
+        checked = changed = 0;
+    }
+    (void)guest_now;
+}
+
+std::string BufferCache::PhysicsInputDiff(u64 skin_dispatch, u64 previous_skin_dispatch) {
+    const auto slot7_address = [&](u64 dispatch) -> VAddr {
+        for (const auto& [d, ranges] : recent_bone_ranges) {
+            if (d == dispatch) {
+                for (const auto& range : ranges) {
+                    if (range.slot == 7) {
+                        return range.address;
+                    }
+                }
+            }
+        }
+        return 0;
+    };
+    const auto writers = [&](VAddr address) {
+        std::vector<std::pair<u64, const std::vector<PhysicsBinding>*>> out;
+        for (const auto& [d, bindings] : recent_physics) {
+            for (const auto& b : bindings) {
+                if (address && b.written && b.address == address) {
+                    out.emplace_back(d, &bindings);
+                    break;
+                }
+            }
+        }
+        return out;
+    };
+    const VAddr now_address = slot7_address(skin_dispatch);
+    const VAddr before_address = slot7_address(previous_skin_dispatch);
+    const auto now_writers = writers(now_address);
+    const auto before_writers = writers(before_address);
+    std::string text = fmt::format(" [physics writers of slot 7 {:#x}: {}, two frames before ({:#x}): {}",
+                                   now_address, now_writers.size(), before_address,
+                                   before_writers.size());
+    const auto diff = [](const std::vector<u8>& a, const std::vector<u8>& b, float& max_diff,
+                         u32& at, u32& big, float& value_now, float& value_before) {
+        max_diff = 0.0f;
+        at = 0;
+        big = 0;
+        for (u32 i = 0; i + 4 <= a.size() && i + 4 <= b.size(); i += 4) {
+            float x, y;
+            std::memcpy(&x, a.data() + i, 4);
+            std::memcpy(&y, b.data() + i, 4);
+            if (!std::isfinite(x) || !std::isfinite(y)) {
+                continue;
+            }
+            const float d = std::abs(x - y);
+            big += d > 0.5f;
+            if (d > max_diff) {
+                max_diff = d;
+                at = i / 4;
+                value_now = x;
+                value_before = y;
+            }
+        }
+    };
+    for (size_t k = 0; k < std::min(now_writers.size(), before_writers.size()); ++k) {
+        const auto& now_bindings = *now_writers[k].second;
+        const auto& before_bindings = *before_writers[k].second;
+        std::vector<std::pair<float, std::string>> slots;
+        for (const auto& b : now_bindings) {
+            for (const auto& o : before_bindings) {
+                if (o.slot != b.slot || o.size != b.size) {
+                    continue;
+                }
+                float max_pre = 0, now_pre = 0, before_pre = 0;
+                u32 at_pre = 0, big_pre = 0;
+                diff(b.pre, o.pre, max_pre, at_pre, big_pre, now_pre, before_pre);
+                std::string entry = fmt::format(
+                    " slot {} ({} B{}{}): read differs most at float {} ({:.4g} vs {:.4g}), {} "
+                    "floats by > 0.5",
+                    b.slot, b.size, b.written ? ", written" : "",
+                    b.address == o.address ? ", same address" : "", at_pre, now_pre, before_pre,
+                    big_pre);
+                float max_post = 0;
+                if (b.written && !b.post.empty() && !o.post.empty()) {
+                    float now_post = 0, before_post = 0;
+                    u32 at_post = 0, big_post = 0;
+                    diff(b.post, o.post, max_post, at_post, big_post, now_post, before_post);
+                    entry += fmt::format("; wrote: most at float {} ({:.4g} vs {:.4g}), {} by > 0.5",
+                                         at_post, now_post, before_post, big_post);
+                }
+                slots.emplace_back(std::max(max_pre, max_post), std::move(entry));
+            }
+        }
+        std::ranges::sort(slots, [](const auto& a, const auto& b) { return a.first > b.first; });
+        text += fmt::format(" | dispatch {} vs {}:", now_writers[k].first, before_writers[k].first);
+        for (size_t i = 0; i < std::min<size_t>(slots.size(), 8); ++i) {
+            text += slots[i].second + ";";
+        }
+    }
+    return text + "]";
+}
+
+void BufferCache::PollBonePeeks() {
+    static u32 checked = 0, late = 0, late_shared = 0, late_pending = 0, late_gpu_bytes = 0;
+    // Binds on physics result pages (the joint slots: the hair's bones) checked and late; and
+    // late ones elsewhere whose changed bytes are all zero now (per-frame ring memory the game
+    // cleared after the emulator's fence, which comes before the GPU runs: harmless).
+    static u32 result_checked = 0, result_late = 0, cleared_late = 0, other_details = 0;
+    static u64 late_bytes = 0;
+    static std::map<u32, std::pair<u32, u32>> by_slot; // slot -> (checked, late)
+    static std::vector<std::string> details;
+    static u32 details_total = 0;
+    // What each recent skinning dispatch's bone bindings read (for CheckSkinOutput).
+    auto& recent = recent_bone_reads;
+    static auto last = std::chrono::steady_clock::now();
+    static s64 last_refresh_us = 0;
+    while (!bone_peeks.empty()) {
+        if (!scheduler.IsFree(bone_peeks.front().tick)) {
+            // The cached GPU tick lags: refreshed at most every 0.5 ms (an ioctl).
+            const s64 now_us = TraceUs();
+            if (now_us - last_refresh_us < 500) {
+                break;
+            }
+            last_refresh_us = now_us;
+            scheduler.GetWorkSemaphore()->Refresh();
+            if (!scheduler.IsFree(bone_peeks.front().tick)) {
+                break;
+            }
+        }
+        BonePeek& peek = bone_peeks.front();
+        if (peek.written && !peek.post_mapped) {
+            break; // its copy after the dispatch is not recorded yet
+        }
+        peek.buffer->Invalidate(peek.offset, peek.staging_size);
+        if (peek.post_mapped) {
+            peek.post_buffer->Invalidate(peek.post_offset, peek.post_staging_size);
+        }
+        std::vector<u8> now(peek.guest.empty() ? 0 : peek.size); // none: not checked (light)
+        if (!now.empty() && !memory->TryReadBacking(peek.address, now.data(), peek.size)) {
+            memory->CopySparseMemory(peek.address, now.data(), peek.size);
+        }
+        const s64 checked_us = TraceUs();
+        // A byte the skinning read older than the guest's: it differs from what the GPU read,
+        // unless it was GPU data whose guest copy has not changed since (its readback has not
+        // come yet: the guest's copy is the older one), or the guest holds the poison of a shared
+        // page there (GPU data too).
+        u32 n = 0, first = 0, last_byte = 0, gpu_bytes = 0;
+        bool cleared = true;
+        for (u64 i = 0; i < now.size(); ++i) {
+            const u8 used = peek.mapped[i];
+            if (now[i] != used && !(peek.gpu_owned[i] && now[i] == peek.guest[i]) &&
+                now[i] != PoisonByte((peek.address + i) & (LAZY_PAGE_SIZE - 1)) &&
+                !(peek.post_mapped && now[i] == peek.post_mapped[i])) {
+                if (n++ == 0) {
+                    first = static_cast<u32>(i);
+                }
+                last_byte = static_cast<u32>(i);
+                gpu_bytes += peek.gpu_owned[i];
+                cleared &= now[i] == 0;
+            }
+        }
+        const u32 slot_key = peek.shader == 0x106beafd ? 1000 + peek.slot : peek.slot;
+        ++checked;
+        ++by_slot[slot_key].first;
+        result_checked += peek.result_page;
+        if (n) {
+            result_late += peek.result_page;
+            cleared_late += !peek.result_page && cleared;
+        }
+        if (recent.empty() || recent.back().first != peek.dispatch) {
+            recent.emplace_back(peek.dispatch, std::string{});
+            if (recent.size() > 256) {
+                recent.pop_front();
+            }
+        }
+        if (recent_bone_ranges.empty() || recent_bone_ranges.back().first != peek.dispatch) {
+            recent_bone_ranges.emplace_back(peek.dispatch, std::vector<BoneRange>{});
+            if (recent_bone_ranges.size() > 256) {
+                recent_bone_ranges.pop_front();
+            }
+        }
+        if (peek.shader == 0x106beafd) {
+            CheckPhysicsState(peek, now);
+            if (recent_physics.empty() || recent_physics.back().first != peek.dispatch) {
+                recent_physics.emplace_back(peek.dispatch, std::vector<PhysicsBinding>{});
+                if (recent_physics.size() > 128) {
+                    recent_physics.pop_front();
+                }
+            }
+            recent_physics.back().second.push_back(
+                {peek.slot, peek.address, peek.size, peek.written,
+                 std::vector<u8>(peek.mapped, peek.mapped + peek.size),
+                 peek.post_mapped ? std::vector<u8>(peek.post_mapped, peek.post_mapped + peek.size)
+                                  : std::vector<u8>{}});
+        }
+        recent_bone_ranges.back().second.push_back(
+            {peek.address, peek.size, peek.slot, peek.bound_us, peek.tick,
+             peek.shader == 0x45df1f62 && (peek.slot == 6 || peek.slot == 7)
+                 ? std::vector<u8>(peek.mapped, peek.mapped + peek.size)
+                 : std::vector<u8>{}});
+        recent.back().second += fmt::format(
+            " [slot {} {:#x}+{}{}{}: {}]", peek.slot, peek.address, peek.size,
+            peek.result_page ? " result page" : "", peek.pending_readback ? " readback pending" : "",
+            n ? fmt::format("{} bytes older than the guest's at {:#x}-{:#x}", n, first, last_byte)
+              : std::string{"as the guest"});
+        // Details: every late one of the skinning on a result page (up to 10 per 5 s), two
+        // others. (The physics shader's are counted only: it writes its joint slots in two
+        // dispatches and their readbacks land after the check, so its late bytes are its own.)
+        const bool detail = n && peek.shader != 0x106beafd &&
+                            (peek.result_page || (!cleared && other_details < 2));
+        if (n) {
+            ++late;
+            late_bytes += n;
+            late_gpu_bytes += gpu_bytes;
+            ++by_slot[slot_key].second;
+            late_shared += peek.shared;
+            late_pending += peek.pending_readback;
+            if (detail && details.size() < 10 && details_total < 400) {
+                ++details_total;
+                other_details += !peek.result_page;
+                std::vector<std::pair<s64, std::string>> faults, writes;
+                {
+                    std::scoped_lock lock{g_trace_mutex};
+                    for (const auto& f : g_traced_faults) {
+                        if (f.end_us && f.address >= peek.address && f.address < peek.address + peek.size &&
+                            f.end_us >= peek.bound_us - 100'000 && f.start_us <= checked_us) {
+                            faults.emplace_back(f.start_us,
+                                                fmt::format(" [{:#x} {:+.1f}..{:+.1f} ms: {}]", f.address,
+                                                            (f.start_us - peek.bound_us) / 1e3,
+                                                            (f.end_us - peek.bound_us) / 1e3, f.note));
+                        }
+                    }
+                    for (const auto& w : g_traced_joint_writes) {
+                        if (w.us && w.address < peek.address + peek.size &&
+                            peek.address < w.address + w.size && w.us >= peek.bound_us - 200'000 &&
+                            w.us <= checked_us) {
+                            writes.emplace_back(w.us, fmt::format(" [slot {} {:#x}+{} {:+.1f} ms, tick {}]",
+                                                                  w.slot, w.address, w.size,
+                                                                  (w.us - peek.bound_us) / 1e3, w.tick));
+                        }
+                    }
+                }
+                std::ranges::sort(faults);
+                std::ranges::sort(writes);
+                std::string fault_text, write_text;
+                for (const auto& [t, text] : faults) {
+                    fault_text += text;
+                }
+                for (const auto& [t, text] : writes) {
+                    write_text += text;
+                }
+                const u32 word = first & ~3u;
+                u32 used_word = 0, now_word = 0, bound_word = 0;
+                if (word + 4 <= peek.size) {
+                    std::memcpy(&used_word, peek.mapped + word, 4);
+                    std::memcpy(&now_word, now.data() + word, 4);
+                    std::memcpy(&bound_word, peek.guest.data() + word, 4);
+                }
+                details.push_back(fmt::format(
+                    "Bone trace: {} slot {} {:#x}+{} (tick {}{}{}{}): {} bytes read older than the guest's "
+                    "({} of them GPU data then), offsets {:#x}-{:#x} (dword {:#x}: read {:08x}, guest "
+                    "at the bind {:08x}, now {:08x}); the GPU done by {:+.1f} ms after the bind; CPU write "
+                    "faults into it:{}; physics writes into it:{}",
+                    peek.shader == 0x106beafd ? "physics 106beafd" : "skinning", peek.slot,
+                    peek.address, peek.size, peek.tick,
+                    peek.result_page ? ", physics result page" : "", peek.shared ? ", shared page" : "",
+                    peek.pending_readback ? ", readback pending" : "", n, gpu_bytes, first, last_byte,
+                    word, used_word, bound_word, now_word, (checked_us - peek.bound_us) / 1e3,
+                    fault_text.empty() ? " none" : fault_text, write_text.empty() ? " none" : write_text));
+            }
+        }
+        staging_pool.FreeDeferred(Vulkan::StagingBufferRef{
+            .buffer = peek.buffer,
+            .offset = peek.offset,
+            .size = peek.staging_size,
+            .mapped = peek.mapped,
+            .type = VideoCore::MemoryType::HostCached,
+        });
+        if (peek.post_mapped) {
+            staging_pool.FreeDeferred(Vulkan::StagingBufferRef{
+                .buffer = peek.post_buffer,
+                .offset = peek.post_offset,
+                .size = peek.post_staging_size,
+                .mapped = peek.post_mapped,
+                .type = VideoCore::MemoryType::HostCached,
+            });
+        }
+        bone_peeks.pop_front();
+    }
+    while (!skin_peeks.empty() && scheduler.IsFree(skin_peeks.front().tick)) {
+        SkinPeek& peek = skin_peeks.front();
+        peek.buffer->Invalidate(peek.offset, peek.staging_size);
+        CheckSkinOutput(peek);
+        staging_pool.FreeDeferred(Vulkan::StagingBufferRef{
+            .buffer = peek.buffer,
+            .offset = peek.offset,
+            .size = peek.staging_size,
+            .mapped = peek.mapped,
+            .type = VideoCore::MemoryType::HostCached,
+        });
+        skin_peeks.pop_front();
+    }
+    if (const auto now = std::chrono::steady_clock::now(); checked && now - last >= std::chrono::seconds{5}) {
+        last = now;
+        std::string slots;
+        for (const auto& [slot, counts] : by_slot) {
+            slots += fmt::format(" {}: {}/{}", slot, counts.second, counts.first);
+        }
+        std::printf("Bone trace (5 s): %u bone bindings of the skinning checked, %u read bytes older "
+                    "than the guest's (%llu bytes, %u of them GPU data at the bind; %u on shared "
+                    "pages, %u with a readback pending); on physics result pages (joint slots): "
+                    "%u of %u; elsewhere cleared since (ring memory reused): %u; late/checked by "
+                    "slot:%s\n",
+                    checked, late, static_cast<unsigned long long>(late_bytes), late_gpu_bytes,
+                    late_shared, late_pending, result_late, result_checked, cleared_late,
+                    slots.c_str());
+        for (const auto& line : details) {
+            std::printf("%s\n", line.c_str());
+        }
+        std::fflush(stdout);
+        checked = late = late_shared = late_pending = late_gpu_bytes = 0;
+        result_checked = result_late = cleared_late = other_details = 0;
+        late_bytes = 0;
+        by_slot.clear();
+        details.clear();
+    }
 }
 
 void BufferCache::ResolvePoisonedPages(VAddr address, u64 size) {
@@ -3623,7 +4607,6 @@ void BufferCache::NoteGpuWriteWindows(VAddr address, u64 size) {
     }
 }
 
-
 u64 BufferCache::FetchableWindowTick(VAddr page, bool count_refusals) {
     const u32 counted = count_refusals ? 1 : 0;
     if (lazy_pages.contains(page)) {
@@ -3766,7 +4749,18 @@ bool BufferCache::SideQueueFetch(std::span<const std::pair<VAddr, u64>> pieces, 
         .pSemaphores = &done,
         .pValues = &done_value,
     };
+    const auto wait_start = std::chrono::steady_clock::now();
     std::ignore = device.waitSemaphores(wait_info, std::numeric_limits<u64>::max());
+    {
+        const u32 us = static_cast<u32>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - wait_start)
+                                            .count());
+        g_side_fetches.fetch_add(1, std::memory_order_relaxed);
+        g_side_fetch_us.fetch_add(us, std::memory_order_relaxed);
+        for (u32 max = g_side_fetch_max_us.load(std::memory_order_relaxed);
+             us > max && !g_side_fetch_max_us.compare_exchange_weak(max, us);) {
+        }
+    }
     staging.Invalidate();
     const u8* source = staging.mapped;
     for (const auto& [address, size] : pieces) {
@@ -4861,6 +5855,14 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
             ForEachLazyUploadPiece(addr, size, [&](VAddr piece, u64 piece_size) {
                 copies.emplace_back(total_size_bytes, piece, piece_size);
                 total_size_bytes += piece_size;
+                if (!is_written && RecentWritesEnabled() &&
+                    gpu_modified_ranges.Intersects(piece, piece_size)) {
+                    u64 gpu_bytes = 0;
+                    gpu_modified_ranges.ForEachInRange(piece, piece_size,
+                                                       [&](VAddr lo, VAddr hi) { gpu_bytes += hi - lo; });
+                    NoteUploadOverGpu(piece, piece_size, gpu_bytes,
+                                      NewestGpuWriteInto(piece, piece + piece_size).writer);
+                }
             });
         },
         [&] { src_buffer = UploadCopies(arena, copies, total_size_bytes); });

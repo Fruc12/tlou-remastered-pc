@@ -152,6 +152,10 @@ public:
 
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
+    /// gow3 26 Oct 2026 diagnostics (GOW3_FAULT_TIMES=1): how this thread's last write fault
+    /// request ended and where its time went, taken (empty without GOW3_FAULT_TIMES, or when no
+    /// request was sent since).
+    static std::string TakeWriteFaultNote();
 
     /// gow3: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
     void ExtendWriteFault(VAddr device_addr);
@@ -284,6 +288,28 @@ public:
     void PeekGpuBuffer(const Buffer* source, u64 offset, VAddr address, u64 size, u64 tag, u32 slot,
                        u64 dispatch, u32 phase);
     void PollPeeks();
+    /// gow3 26 Oct 2026 diagnostics for The Last of Us's skinning (cs 45df1f62) and its physics
+    /// (cs 106beafd), off by default. GOW3_BONE_TRACE=2 (~10% FPS): each skinning dispatch's
+    /// 52-byte vertex output is watched for sudden stretches ("Hair watch", with the bones it
+    /// read and how they changed). =1 (~35% FPS) also copies every binding of both shaders before
+    /// the dispatch (written physics ones after it too) and checks them against guest memory once
+    /// the GPU has run them ("Bone trace"), and checks that the physics reads back its own state
+    /// ("Physics state"): that check found the stretching hair, the state overwritten by guest
+    /// bytes after RangeSet lost ranges (range_set.h).
+    static bool BoneTraceEnabled();
+    static bool BoneTraceLight();
+    void PeekBones(const Buffer* source, u64 offset, VAddr address, u64 size, u32 slot, u64 dispatch,
+                   u64 shader = 0x45df1f62, bool written = false);
+    /// After the dispatch: the written physics bindings PeekBones copied before it, again (what
+    /// the dispatch wrote is not taken for a late game write).
+    void PeekBonesAfter();
+    /// The vertices a skinning dispatch wrote (its 52-byte vertex outputs, 64-256 KiB: the
+    /// hair's), copied after it: their extent and frame-to-frame jumps; a sudden stretch is
+    /// printed with that dispatch's bone bindings.
+    void PeekSkinOutput(const Buffer* source, u64 offset, VAddr address, u64 size, u64 dispatch);
+    void PollBonePeeks();
+    static void NoteTracedFault(VAddr address, u64 total_ns, const std::string& note);
+    static void NoteJointWrite(VAddr address, u64 size, u32 slot, u64 tick);
 
     /// gow3: writes the readbacks the GPU has finished to guest memory (GPU-side, per draw).
     void PollReadbacks() {
@@ -702,6 +728,77 @@ private:
         u32 phase;    ///< 0: before the dispatch, 1: after
     };
     std::deque<Peek> peeks;
+    struct BonePeek {
+        u64 tick;
+        Buffer* buffer; ///< staging allocation
+        u64 offset;
+        u64 staging_size;
+        u8* mapped;
+        VAddr address;
+        u64 size;
+        u32 slot;
+        s64 bound_us;             ///< when the copy was recorded (TraceUs)
+        std::vector<u8> guest;     ///< guest memory then
+        std::vector<u8> gpu_owned; ///< 1: a GPU-written byte then (gpu_modified_ranges)
+        bool pending_readback;     ///< a readback of its GPU bytes was on its way then
+        bool shared;               ///< on a shared page (lazy_pages) then
+        bool result_page;          ///< on a physics result page (IsResultPage: the joint slots)
+        u64 dispatch;              ///< the skinning dispatch's number (Rasterizer)
+        u64 shader;                ///< 45df1f62 (skinning) or 106beafd (physics)
+        bool written;              ///< a written binding (physics): copied after the dispatch too
+        const Buffer* source = nullptr;
+        u64 source_offset = 0;
+        Buffer* post_buffer = nullptr;
+        u64 post_offset = 0;
+        u64 post_staging_size = 0;
+        u8* post_mapped = nullptr;
+    };
+    std::vector<BonePeek*> bone_peeks_after; ///< written ones waiting for their copy after
+    std::deque<BonePeek> bone_peeks; ///< GOW3_BONE_TRACE
+    struct SkinPeek {
+        u64 tick;
+        Buffer* buffer;
+        u64 offset;
+        u64 staging_size;
+        u8* mapped;
+        VAddr address;
+        u64 size;
+        u64 dispatch;
+        s64 us;
+    };
+    std::deque<SkinPeek> skin_peeks; ///< GOW3_BONE_TRACE
+    std::deque<std::pair<u64, std::string>> recent_bone_reads; ///< by skinning dispatch
+    struct BoneRange {
+        VAddr address;
+        u64 size;
+        u32 slot;
+        s64 bound_us;
+        u64 tick;
+        std::vector<u8> read; ///< what the skinning read (slots 6 and 7)
+    };
+    std::deque<std::pair<u64, std::vector<BoneRange>>> recent_bone_ranges; ///< by dispatch
+    /// (GOW3_BONE_TRACE=1) each recent physics dispatch's bindings, as read and as written.
+    struct PhysicsBinding {
+        u32 slot;
+        VAddr address;
+        u64 size;
+        bool written;
+        std::vector<u8> pre, post;
+    };
+    std::deque<std::pair<u64, std::vector<PhysicsBinding>>> recent_physics;
+    /// (GOW3_BONE_TRACE=1) what the physics shader last wrote into each written binding (its
+    /// state between frames), with when: the next dispatch must read it back unchanged.
+    struct LastPhysicsWrite {
+        std::vector<u8> bytes;
+        s64 us;
+        u64 tick;
+    };
+    std::map<std::pair<VAddr, u64>, LastPhysicsWrite> last_physics_writes;
+    void CheckPhysicsState(const BonePeek& peek, const std::vector<u8>& guest_now);
+    /// The physics dispatches that wrote the skinning dispatches' slot 7 bones, now and two
+    /// frames before: their bindings compared, slot by slot.
+    std::string PhysicsInputDiff(u64 skin_dispatch, u64 previous_skin_dispatch);
+    void CheckSkinOutput(const SkinPeek& peek);
     struct PendingReadback {
         u64 tick = 0;
         Buffer* buffer = nullptr;

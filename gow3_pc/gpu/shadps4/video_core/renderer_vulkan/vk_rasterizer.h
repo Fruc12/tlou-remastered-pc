@@ -568,6 +568,11 @@ private:
         u64 buffer_offset;
     };
     std::vector<ClothPeek> cloth_peeks; ///< gow3 diagnostics (GOW3_CLOTH_PEEK)
+    std::vector<ClothPeek> bone_peeks;  ///< gow3 diagnostics (GOW3_BONE_TRACE)
+    std::vector<ClothPeek> skin_outputs; ///< (GOW3_BONE_TRACE) the skinning's vertex outputs
+    u64 bone_dispatch = 0;               ///< (GOW3_BONE_TRACE) skinning dispatches traced
+    void PeekBoneBindings();
+    void PeekSkinOutputs();
     bool sync_gpu_constants = [] {
         const char* env = std::getenv("GOW3_SYNC_GPU_CONSTANTS");
         return env && env[0] == '1';

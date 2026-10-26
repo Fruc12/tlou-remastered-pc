@@ -105,7 +105,8 @@ bool SrtCheckEnabled();
 void NoteSrtWalk(const Shader::Info& info);
 extern Rasterizer* g_srt_check_rasterizer;
 bool LateConstantsEnabled();
-void NoteLateGuestCopy(VideoCore::Buffer& buffer, u64 offset, VAddr address, u32 size, u64 due);
+void NoteLateGuestCopy(VideoCore::Buffer& buffer, u64 offset, VAddr address, u32 size, u64 due,
+                       u64 shader);
 void NoteLateFlatCopy(VideoCore::Buffer& buffer, u64 offset, const Shader::Info& stage, u32 size,
                       u64 due);
 void NoteLateDue(u64 ring_end);
@@ -222,6 +223,7 @@ struct LateConstant {
     u64 hash;                     // XXH3 of the bytes copied
     VAddr address;                // guest bytes copied (0: flattened user data)
     Shader::PFN_SrtWalker walker; // flattened user data: the walk to repeat
+    u64 shader;                   // the stage's program (GOW3_LATE_CONSTANTS=report)
     u32 size;
     u32 ud_size;
     std::array<u32, Shader::NUM_USER_DATA_REGS> user_data; // the first ud_size are set
@@ -361,9 +363,21 @@ bool LateConstantsVerify() {
 bool LateConstantsEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_LATE_CONSTANTS");
-        return env && env[0] == '1';
+        return env && (env[0] == '1' || env[0] == 'r');
     }();
     return enabled;
+}
+
+/// gow3 26 Oct 2026: GOW3_LATE_CONSTANTS=report checks the copies as =1 does but writes nothing
+/// back: it counts, per shader, the copies whose source the game changed after the copy. (=1
+/// lost the device at The Last of Us's main menu once: a refresh rewrites ring bytes that a
+/// command buffer already submitted may still read.)
+bool LateConstantsReportOnly() {
+    static const bool report = [] {
+        const char* env = std::getenv("GOW3_LATE_CONSTANTS");
+        return env && env[0] == 'r';
+    }();
+    return report;
 }
 
 bool LateConstantsDefer() {
@@ -376,7 +390,8 @@ bool LateConstantsDefer() {
 
 /// `due`: the constant ring position after the copy (checked at the submission of its draw), or 0
 /// (checked at the next submission).
-void NoteLateGuestCopy(VideoCore::Buffer& buffer, u64 offset, VAddr address, u32 size, u64 due) {
+void NoteLateGuestCopy(VideoCore::Buffer& buffer, u64 offset, VAddr address, u32 size, u64 due,
+                       u64 shader) {
     const u64 hash = XXH3_64bits(buffer.mapped_data.data() + offset, size);
     (due ? g_late_ring : g_late_now).Push([&](LateConstant& entry) {
         entry.buffer = &buffer;
@@ -385,6 +400,7 @@ void NoteLateGuestCopy(VideoCore::Buffer& buffer, u64 offset, VAddr address, u32
         entry.hash = hash;
         entry.address = address;
         entry.walker = nullptr;
+        entry.shader = shader;
         entry.size = size;
         entry.ud_size = 0;
     });
@@ -405,6 +421,7 @@ void NoteLateFlatCopy(VideoCore::Buffer& buffer, u64 offset, const Shader::Info&
         entry.hash = hash;
         entry.address = 0;
         entry.walker = stage.srt_info.walker_func;
+        entry.shader = stage.pgm_hash;
         entry.size = size;
         entry.ud_size = ud_size;
         std::memcpy(entry.user_data.data(), user_data.data(), ud_size * sizeof(u32));
@@ -447,6 +464,12 @@ void RefreshLateConstants(Core::MemoryManager* memory) {
     static std::vector<u32> used;
     static std::vector<u8> now, refreshed;
     u64 checked = 0, changed = 0, bytes = 0, sources = 0, walks = 0, changed_walks = 0;
+    // GOW3_LATE_CONSTANTS=report: per shader, copies checked, changed since, of them walks, bytes.
+    struct ShaderLate {
+        u64 checked, late, walks, bytes;
+    };
+    static std::unordered_map<u64, ShaderLate> by_shader;
+    const bool report_only = LateConstantsReportOnly();
     u64 verified = 0, copy_changed = 0, missed = 0, extra = 0;
     const auto same_source = [](const LateConstant& a, const LateConstant& b) {
         if (a.address || b.address) {
@@ -501,6 +524,10 @@ void RefreshLateConstants(Core::MemoryManager* memory) {
             return;
         }
         ++checked;
+        ShaderLate* late = report_only ? &by_shader[entry.shader] : nullptr;
+        if (late) {
+            ++late->checked;
+        }
         u8* dst = entry.buffer->mapped_data.data() + entry.offset;
         if (LateConstantsVerify()) {
             // The old check: the source read again, compared byte for byte with the copy.
@@ -524,6 +551,16 @@ void RefreshLateConstants(Core::MemoryManager* memory) {
             }
         }
         if (hash == entry.hash) {
+            return;
+        }
+        if (late) {
+            // Report only: the copy stays as it was.
+            ++late->late;
+            late->walks += !entry.address;
+            late->bytes += entry.size;
+            ++changed;
+            changed_walks += !entry.address;
+            bytes += entry.size;
             return;
         }
         // Changed since the copy: copied or walked again into it.
@@ -574,16 +611,31 @@ void RefreshLateConstants(Core::MemoryManager* memory) {
         last = t;
         const u64 refreshed_all = g_late_refreshed.exchange(0);
         const u64 refreshed_walks = g_late_refreshed_walks.exchange(0);
-        std::printf("Late constants (5 s): %llu copies checked before submission, %llu refreshed "
+        std::printf("Late constants (5 s): %llu copies checked before submission, %llu %s "
                     "(%.1f KB; %llu guest copies, %llu table walks); %llu distinct sources read "
                     "(%llu table walks), %llu ring copies waiting for their draw\n",
                     static_cast<unsigned long long>(g_late_checked.exchange(0)),
-                    static_cast<unsigned long long>(refreshed_all), g_late_bytes.exchange(0) / 1e3,
+                    static_cast<unsigned long long>(refreshed_all),
+                    report_only ? "changed since the copy (report only, not refreshed)" : "refreshed",
+                    g_late_bytes.exchange(0) / 1e3,
                     static_cast<unsigned long long>(refreshed_all - refreshed_walks),
                     static_cast<unsigned long long>(refreshed_walks),
                     static_cast<unsigned long long>(g_late_sources.exchange(0)),
                     static_cast<unsigned long long>(g_late_walks.exchange(0)),
                     static_cast<unsigned long long>(g_late_ring.Pending()));
+        if (report_only && !by_shader.empty()) {
+            std::vector<std::pair<u64, ShaderLate>> top(by_shader.begin(), by_shader.end());
+            std::ranges::sort(top, std::greater{}, [](const auto& item) { return item.second.late; });
+            std::string text;
+            for (size_t i = 0; i < top.size() && i < 16 && top[i].second.late; ++i) {
+                const auto& [shader, s] = top[i];
+                text += fmt::format(" {:08x} {}/{} ({} walks, {:.1f} KB);", shader, s.late, s.checked,
+                                    s.walks, s.bytes / 1e3);
+            }
+            std::printf("Late constants by shader (5 s, changed/checked):%s\n",
+                        text.empty() ? " none" : text.c_str());
+            by_shader.clear();
+        }
         if (LateConstantsVerify()) {
             std::printf("Late constants verify (5 s): %llu checks compared byte for byte; %llu copies "
                         "changed since their note, %llu changes the hash check missed, %llu hash "
@@ -1637,7 +1689,7 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
                 NoteLateFlatCopy(constant_ring->Storage(), *offset, stage, static_cast<u32>(size), due);
             } else {
                 NoteLateGuestCopy(constant_ring->Storage(), *offset, address, static_cast<u32>(size),
-                                  due);
+                                  due, stage.pgm_hash);
             }
         }
         out.push_back({index, static_cast<u32>(size), *offset, address});
@@ -3059,6 +3111,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         buffer_cache.PeekGpuBuffer(peek.buffer, peek.buffer_offset, peek.address, peek.size, peek.shader,
                                    peek.slot, cloth_dispatch, 0);
     }
+    PeekBoneBindings();
     const bool full_barrier = FullBarriersEnabled();
     const bool bound = skip_rebind && handle == bound_compute_pipeline &&
                        serial_before_bind == bound_compute_serial &&
@@ -3088,6 +3141,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     DebugState.IncDispatch();
 
     ResetBindings(true);
+    // (After ResetBindings: the dispatch's writes are tracked then, so the copies wait for them.)
+    PeekSkinOutputs();
     if (ClothTraceEnabled() && (cs.pgm_hash == 0x1c957b01 || cs.pgm_hash == 0x809864d3)) {
         g_cloth_epoch = runtime.AccessEpoch();
         g_cloth_epoch_shader = cs.pgm_hash;
@@ -3150,6 +3205,7 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
         buffer_cache.PeekGpuBuffer(peek.buffer, peek.buffer_offset, peek.address, peek.size, peek.shader,
                                    peek.slot, cloth_dispatch, 0);
     }
+    PeekBoneBindings();
     const bool full_barrier = FullBarriersEnabled();
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (full_barrier) {
@@ -3171,6 +3227,8 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     DebugState.IncDispatch();
 
     ResetBindings(true);
+    // (After ResetBindings: the dispatch's writes are tracked then, so the copies wait for them.)
+    PeekSkinOutputs();
     if (const u64 hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
         ClothTraceEnabled() && (hash == 0x1c957b01 || hash == 0x809864d3)) {
         g_cloth_epoch = runtime.AccessEpoch();
@@ -3217,10 +3275,43 @@ void Rasterizer::EndSubmission() {
         &unused, sizeof(unused));
 }
 
+// gow3 26 Oct 2026 diagnostics (GOW3_BONE_TRACE=1): the bone bindings of the dispatch about to be
+// recorded, copied as the skinning will read them (after their uploads).
+void Rasterizer::PeekBoneBindings() {
+    // (Light trace: the bones only of dispatches that write a watched vertex output.)
+    if (VideoCore::BufferCache::BoneTraceLight() && skin_outputs.empty()) {
+        bone_peeks.clear();
+    }
+    if (bone_peeks.empty() && skin_outputs.empty()) {
+        return;
+    }
+    ++bone_dispatch;
+    for (const auto& peek : bone_peeks) {
+        buffer_cache.PeekBones(peek.buffer, peek.buffer_offset, peek.address, peek.size, peek.slot,
+                               bone_dispatch, peek.shader, peek.written);
+    }
+    bone_peeks.clear();
+}
+
+// After the dispatch: the vertices it wrote, the physics bindings it wrote.
+void Rasterizer::PeekSkinOutputs() {
+    if (VideoCore::BufferCache::BoneTraceEnabled()) {
+        buffer_cache.PeekBonesAfter();
+    }
+    for (const auto& peek : skin_outputs) {
+        buffer_cache.PeekSkinOutput(peek.buffer, peek.buffer_offset, peek.address, peek.size,
+                                    bone_dispatch);
+    }
+    skin_outputs.clear();
+}
+
 void Rasterizer::OnSubmit() {
     DrainDrawPipe();
     buffer_cache.ReclaimArenaMemory();
     buffer_cache.PollPeeks();
+    if (VideoCore::BufferCache::BoneTraceEnabled()) {
+        buffer_cache.PollBonePeeks();
+    }
     buffer_cache.RunShareChecks();
     memory->CheckCopiedSources();
     CheckSrtWalks();
@@ -5355,6 +5446,33 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                         : 0;
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                // gow3 26 Oct 2026 diagnostics (GOW3_BONE_TRACE=1): The Last of Us's skinning
+                // (cs 45df1f62) bone bindings, checked after the GPU has run them, and the
+                // physics shader's (106beafd) writes of joint slots.
+                if (VideoCore::BufferCache::BoneTraceEnabled() && stage.pgm_hash == 0x45df1f62 &&
+                    desc.is_written && size >= 64_KB && size <= 256_KB && size % 52 == 0) {
+                    skin_outputs.push_back({vsharp.base_address, size, stage.pgm_hash, binding.buffer,
+                                            true, buffer, offset});
+                }
+                if (VideoCore::BufferCache::BoneTraceEnabled() && size >= 1_KB && size <= 16_KB) {
+                    if (stage.pgm_hash == 0x45df1f62 && !desc.is_written &&
+                        (!VideoCore::BufferCache::BoneTraceLight() || binding.buffer == 6 ||
+                         binding.buffer == 7)) {
+                        bone_peeks.push_back({vsharp.base_address, size, stage.pgm_hash, binding.buffer,
+                                              false, buffer, offset});
+                    } else if (stage.pgm_hash == 0x106beafd && desc.is_written) {
+                        VideoCore::BufferCache::NoteJointWrite(vsharp.base_address, size, binding.buffer,
+                                                               scheduler.CurrentTick());
+                    }
+                }
+                // The physics shader's bindings (what it reads, written ones too: the joint
+                // slots it updates in place), up to 64 KiB.
+                if (VideoCore::BufferCache::BoneTraceEnabled() &&
+                    !VideoCore::BufferCache::BoneTraceLight() && stage.pgm_hash == 0x106beafd &&
+                    size <= 64_KB) {
+                    bone_peeks.push_back({vsharp.base_address, size, stage.pgm_hash, binding.buffer,
+                                          bool(desc.is_written), buffer, offset});
+                }
                 if (cloth_peek && (stage.pgm_hash == 0x1c957b01 || stage.pgm_hash == 0x809864d3) &&
                     size <= 1_MB) {
                     cloth_peeks.push_back({vsharp.base_address, size, stage.pgm_hash, buffer_index,
@@ -6918,12 +7036,18 @@ void Rasterizer::NoteWriteFaultTime(VAddr addr, bool gpu_side, const std::array<
     static constexpr u64 Limits[] = {20'000, 100'000, 1'000'000, 10'000'000, ~0ull};
     static std::atomic<u64> counts[5], sums[5], step_ns[5], gpu_side_count;
     static std::mutex slow_mutex;
-    static std::vector<std::tuple<u64, VAddr, std::array<u64, 5>, bool>> slow;
+    static std::vector<std::tuple<u64, VAddr, std::array<u64, 5>, bool, std::string>> slow;
     static std::atomic<s64> last_report{0};
+    // gow3 26 Oct 2026: how the buffer cache's request for this fault ended (taken for every
+    // fault, so that a fault sending none prints no older note).
+    std::string note = VideoCore::BufferCache::TakeWriteFaultNote();
     u64 total = 0;
     for (u32 i = 0; i < 5; ++i) {
         total += steps[i];
         step_ns[i].fetch_add(steps[i], std::memory_order_relaxed);
+    }
+    if (VideoCore::BufferCache::BoneTraceEnabled()) {
+        VideoCore::BufferCache::NoteTracedFault(addr, total, note);
     }
     u32 bucket = 0;
     while (total >= Limits[bucket]) {
@@ -6934,7 +7058,7 @@ void Rasterizer::NoteWriteFaultTime(VAddr addr, bool gpu_side, const std::array<
     gpu_side_count.fetch_add(gpu_side, std::memory_order_relaxed);
     if (total >= 1'000'000) {
         std::scoped_lock lock{slow_mutex};
-        slow.emplace_back(total, addr, steps, gpu_side);
+        slow.emplace_back(total, addr, steps, gpu_side, std::move(note));
     }
     const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
                         std::chrono::steady_clock::now().time_since_epoch())
@@ -6966,11 +7090,11 @@ void Rasterizer::NoteWriteFaultTime(VAddr addr, bool gpu_side, const std::array<
         std::scoped_lock lock{slow_mutex};
         std::ranges::sort(slow, std::greater{});
         for (size_t i = 0; i < std::min<size_t>(slow.size(), 8); ++i) {
-            const auto& [t, a, s, side] = slow[i];
+            const auto& [t, a, s, side, how] = slow[i];
             text += fmt::format("\n  slow write fault {:#x}: {:.2f} ms (image readbacks {:.2f}, "
-                                "buffers {:.2f}, images {:.2f}, extend {:.2f}, land {:.2f}){}",
+                                "buffers {:.2f}, images {:.2f}, extend {:.2f}, land {:.2f}){}{}{}",
                                 a, t / 1e6, s[0] / 1e6, s[1] / 1e6, s[2] / 1e6, s[3] / 1e6,
-                                s[4] / 1e6, side ? " GPU-side" : "");
+                                s[4] / 1e6, side ? " GPU-side" : "", how.empty() ? "" : ": ", how);
         }
         slow.clear();
     }

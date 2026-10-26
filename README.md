@@ -49,8 +49,9 @@ prologue in Sarah's house, which renders correctly (lighting, skinned characters
    session also records your controller input (`analysis/tlou/pad-record-*.txt`, the newest 5),
    so a crash can be replayed on the same route; `TLOU_RECORD_PAD=0` turns that off.
 4. With this repository on a hard disk, put the shader cache (`analysis/tlou-user/cache`, about
-   700 MB) on an SSD: each new area loads hundreds of its files, and on a hard disk that pauses
-   the game for seconds. With the game closed, move the folder, then link it back:
+   250 MB in some 12,000 files) on an SSD: the game reads all of it in its first seconds, and
+   from a hard disk that takes long enough for the game to build pipelines itself, pausing for
+   seconds. With the game closed, move the folder, then link it back:
    `mklink /J analysis\tlou-user\cache <folder on the SSD>` (in `cmd`).
 
 The in-game menu (Insert, or R3+L2 on a controller) holds the graphics, controls and frame rate

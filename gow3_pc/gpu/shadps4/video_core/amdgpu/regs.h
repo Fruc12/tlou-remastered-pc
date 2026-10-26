@@ -4,6 +4,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <bitset>
 #include <cstring>
 #include <vector>
@@ -200,8 +202,35 @@ union Regs {
 struct RegDirty {
     static constexpr u32 BlockWords = 32;
     static constexpr u32 NumBlocks = Regs::NumRegs / BlockWords;
-    std::bitset<NumBlocks> blocks;
+    /// gow3 26 Oct 2026: a bit per block in 64-bit words, and a bit per word that has one set.
+    /// With a std::bitset, libc++ has no scan for set bits: PostDraw tested all 1,664 blocks per
+    /// draw (~2% of the GPU command thread in The Last of Us).
+    static constexpr u32 NumWords = (NumBlocks + 63) / 64;
+    static_assert(NumWords <= 64);
+    std::array<u64, NumWords> blocks{};
+    u64 words_set = 0;
     bool reset = false; ///< ClearState: defaults, then only the blocks marked after it
+
+    void Set(u32 block) {
+        blocks[block / 64] |= u64{1} << (block % 64);
+        words_set |= u64{1} << (block / 64);
+    }
+    bool Test(u32 block) const {
+        return (blocks[block / 64] >> (block % 64)) & 1;
+    }
+    bool Any() const {
+        return words_set != 0;
+    }
+    /// Calls `func(block)` for each marked block, in increasing order.
+    template <typename Func>
+    void ForEach(Func&& func) const {
+        for (u64 words = words_set; words; words &= words - 1) {
+            const u32 word = u32(std::countr_zero(words));
+            for (u64 bits = blocks[word]; bits; bits &= bits - 1) {
+                func(word * 64 + u32(std::countr_zero(bits)));
+            }
+        }
+    }
 
     void Mark(u32 word, u32 count) {
         if (count == 0 || word >= Regs::NumRegs) {
@@ -209,7 +238,7 @@ struct RegDirty {
         }
         const u32 last = std::min(word + count, Regs::NumRegs) - 1;
         for (u32 block = word / BlockWords; block <= last / BlockWords; ++block) {
-            blocks.set(block);
+            Set(block);
         }
     }
     template <typename T>
@@ -219,7 +248,10 @@ struct RegDirty {
         Mark(u32(offset / sizeof(u32)), u32((sizeof(T) + sizeof(u32) - 1) / sizeof(u32)));
     }
     void Clear() {
-        blocks.reset();
+        for (u64 words = words_set; words; words &= words - 1) {
+            blocks[std::countr_zero(words)] = 0;
+        }
+        words_set = 0;
         reset = false;
     }
 };
@@ -233,13 +265,11 @@ struct RegDelta {
         reset = dirty.reset;
         blocks.clear();
         words.clear();
-        for (u32 block = 0; block < RegDirty::NumBlocks; ++block) {
-            if (dirty.blocks.test(block)) {
-                blocks.push_back(u16(block));
-                const u32* src = regs.reg_array.data() + block * RegDirty::BlockWords;
-                words.insert(words.end(), src, src + RegDirty::BlockWords);
-            }
-        }
+        dirty.ForEach([&](u32 block) {
+            blocks.push_back(u16(block));
+            const u32* src = regs.reg_array.data() + block * RegDirty::BlockWords;
+            words.insert(words.end(), src, src + RegDirty::BlockWords);
+        });
     }
     void Apply(Regs& regs) const {
         if (reset) {

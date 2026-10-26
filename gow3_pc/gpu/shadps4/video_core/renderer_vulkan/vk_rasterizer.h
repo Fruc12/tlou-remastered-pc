@@ -659,6 +659,14 @@ private:
     std::vector<PendingWrite> pending_writes;
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
     u32 pending_checks = 0;
+    /// gow3 26 Oct 2026: the 64 KiB granules pending_writes cover, hashed into a bit each (set
+    /// as writes are noted, rebuilt when the list is trimmed): a clear bit means no pending write
+    /// there, so PendingWriteOverlaps returns without walking the list.
+    static constexpr u32 PendingGranuleBits = 16;
+    static constexpr u32 PendingFilterBits = 4096;
+    std::array<u64, PendingFilterBits / 64> pending_filter{};
+    void FilterPendingRange(VAddr begin, VAddr end);
+    bool PendingFilterHit(VAddr begin, VAddr end) const;
     /// gow3 21 Oct 2026 (GOW3_PIPE_WRITE_END): writes noted for the packet PostDraw is building
     /// take this position until it is committed (then its end: stage B has run it once there).
     static constexpr u64 PendingUncommitted = ~u64{0};

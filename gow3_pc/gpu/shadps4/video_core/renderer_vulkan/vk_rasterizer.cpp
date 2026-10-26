@@ -1453,6 +1453,7 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
             write.position = position;
             pending_min = std::min(pending_min, address);
             pending_max = std::max(pending_max, end);
+            FilterPendingRange(address, end);
             if (uncommitted) {
                 uncommitted_indices.push_back(i);
             }
@@ -1465,6 +1466,35 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     pending_writes.push_back({address, end, position});
     pending_min = std::min(pending_min, address);
     pending_max = std::max(pending_max, end);
+    FilterPendingRange(address, end);
+}
+
+void Rasterizer::FilterPendingRange(VAddr begin, VAddr end) {
+    const u64 first = begin >> PendingGranuleBits;
+    const u64 last = (end - 1) >> PendingGranuleBits;
+    if (last - first >= PendingFilterBits) {
+        pending_filter.fill(~u64{0});
+        return;
+    }
+    for (u64 granule = first; granule <= last; ++granule) {
+        const u32 bit = u32(granule % PendingFilterBits);
+        pending_filter[bit / 64] |= u64{1} << (bit % 64);
+    }
+}
+
+bool Rasterizer::PendingFilterHit(VAddr begin, VAddr end) const {
+    const u64 first = begin >> PendingGranuleBits;
+    const u64 last = (end - 1) >> PendingGranuleBits;
+    if (last - first >= PendingFilterBits) {
+        return true;
+    }
+    for (u64 granule = first; granule <= last; ++granule) {
+        const u32 bit = u32(granule % PendingFilterBits);
+        if ((pending_filter[bit / 64] >> (bit % 64)) & 1) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Rasterizer::PendingCopyWriteOverlaps(VAddr address, u64 size) {
@@ -1517,12 +1547,19 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
         });
         pending_min = ~VAddr{0};
         pending_max = 0;
+        pending_filter.fill(0);
         for (const auto& write : pending_writes) {
             pending_min = std::min(pending_min, write.begin);
             pending_max = std::max(pending_max, write.end);
+            FilterPendingRange(write.begin, write.end);
         }
     }
     const VAddr end = address + size;
+    // gow3 26 Oct 2026: no pending write near the range, no walk (the walk was ~6% of the GPU
+    // command thread in The Last of Us, a check per read-only constant buffer).
+    if (!PendingFilterHit(address, end)) {
+        return false;
+    }
     for (const auto& write : pending_writes) {
         if (address < write.end && write.begin < end && !draw_pipe->Reached(write.position)) {
             return true;
@@ -1648,20 +1685,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     std::array<u16, AmdGpu::RegDirty::NumBlocks> blocks;
     u32 num_blocks = 0;
-#ifdef __GLIBCXX__
-    for (size_t block = dirty.blocks._Find_first(); block < dirty.blocks.size();
-         block = dirty.blocks._Find_next(block)) {
-        blocks[num_blocks++] = static_cast<u16>(block);
-    }
-#else
-    if (dirty.blocks.any()) {
-        for (size_t block = 0; block < dirty.blocks.size(); ++block) {
-            if (dirty.blocks.test(block)) {
-                blocks[num_blocks++] = static_cast<u16>(block);
-            }
-        }
-    }
-#endif
+    dirty.ForEach([&](u32 block) { blocks[num_blocks++] = static_cast<u16>(block); });
     const auto stages =
         pipeline ? pipeline->GetStages() : std::span<const Shader::Info* const>{};
     // Constants: copied here into the ring, the recording thread only binds them.

@@ -10,6 +10,9 @@
 #include <boost/pool/pool.hpp>
 #include <boost/pool/pool_alloc.hpp>
 #include <boost/pool/poolfwd.hpp>
+#include <algorithm>
+#include <iterator>
+#include <map>
 #include "common/types.h"
 
 namespace VideoCore {
@@ -19,85 +22,114 @@ using RangeSetsAllocator =
     boost::fast_pool_allocator<T, boost::default_user_allocator_new_delete,
                                boost::details::pool::default_mutex, 1024, 2048>;
 
+// gow3 26 Oct 2026: disjoint half-open ranges in a std::map (start -> end), touching ones joined.
+// This was a boost::icl::interval_set. Boost.ICL looks up the elements a range overlaps with
+// lower_bound/upper_bound of an interval key; a key overlapping several elements compares
+// "equal" to each of them, which is no strict weak ordering, and with libc++ 22 (MSYS2 clang64)
+// those searches land on any of them: every operation spanning two or more intervals went wrong
+// (subtracting [15,95) from [10,20) [30,40) [50,60) [70,80) [90,100) removed [30,40) only; their
+// intersection with a range returned one interval; ForEachInRange left intervals out). In The
+// Last of Us a batched page fetch (CopyFinishedGpuPage) then left the hair physics' state out of
+// its copy, FinishPageFetch removed the pages from the GPU ranges anyway and the next upload sent
+// the guest's stale copy (zeros) over the state: ~550 times per 5 s, the hair stretched for a
+// frame. A key here is one start address, so the lookups are exact.
 struct RangeSet {
-    using IntervalSet =
-        boost::icl::interval_set<VAddr, std::less,
-                                 ICL_INTERVAL_INSTANCE(ICL_INTERVAL_DEFAULT, VAddr, std::less),
-                                 RangeSetsAllocator>;
-    using IntervalType = typename IntervalSet::interval_type;
-
     explicit RangeSet() = default;
     ~RangeSet() = default;
 
     void Add(VAddr base_address, size_t size) {
-        const VAddr end_address = base_address + size;
-        IntervalType interval{base_address, end_address};
-        m_ranges_set.add(interval);
+        if (size == 0) {
+            return;
+        }
+        VAddr start = base_address;
+        VAddr end = base_address + size;
+        // From the last range starting at or before `start` when it reaches it (touching
+        // included), every range starting at or before `end` is joined into this one.
+        auto it = m_ranges.upper_bound(start);
+        if (it != m_ranges.begin()) {
+            const auto prev = std::prev(it);
+            if (prev->second >= start) {
+                it = prev;
+            }
+        }
+        while (it != m_ranges.end() && it->first <= end) {
+            start = std::min(start, it->first);
+            end = std::max(end, it->second);
+            it = m_ranges.erase(it);
+        }
+        m_ranges.emplace_hint(it, start, end);
     }
 
     void Subtract(VAddr base_address, size_t size) {
-        const VAddr end_address = base_address + size;
-        IntervalType interval{base_address, end_address};
-        m_ranges_set.subtract(interval);
+        if (size == 0 || m_ranges.empty()) {
+            return;
+        }
+        const VAddr start = base_address;
+        const VAddr end = base_address + size;
+        auto it = FirstEndingAfter(start);
+        while (it != m_ranges.end() && it->first < end) {
+            const VAddr lo = it->first;
+            const VAddr hi = it->second;
+            it = m_ranges.erase(it);
+            if (lo < start) {
+                m_ranges.emplace_hint(it, lo, start);
+            }
+            if (hi > end) {
+                m_ranges.emplace_hint(it, end, hi);
+                break;
+            }
+        }
     }
 
     void Clear() {
-        m_ranges_set.clear();
+        m_ranges.clear();
     }
 
+    /// Every byte of [base_address, base_address + size) is in the set (an empty range is).
     bool Contains(VAddr base_address, size_t size) const {
-        const VAddr end_address = base_address + size;
-        IntervalType interval{base_address, end_address};
-        return boost::icl::contains(m_ranges_set, interval);
+        if (size == 0) {
+            return true;
+        }
+        auto it = m_ranges.upper_bound(base_address);
+        if (it == m_ranges.begin()) {
+            return false;
+        }
+        --it;
+        return it->second >= base_address + size;
     }
 
     /// gow3: number of disjoint ranges (statistics).
     size_t Count() const {
-        return m_ranges_set.iterative_size();
+        return m_ranges.size();
     }
 
     bool Intersects(VAddr base_address, size_t size) const {
-        const VAddr end_address = base_address + size;
-        IntervalType interval{base_address, end_address};
-        return boost::icl::intersects(m_ranges_set, interval);
+        if (size == 0) {
+            return false;
+        }
+        const auto it = FirstEndingAfter(base_address);
+        return it != m_ranges.end() && it->first < base_address + size;
     }
 
     template <typename Func>
     void ForEach(Func&& func) const {
-        if (m_ranges_set.empty()) {
-            return;
-        }
-
-        for (const auto& set : m_ranges_set) {
-            const VAddr inter_addr_end = set.upper();
-            const VAddr inter_addr = set.lower();
-            func(inter_addr, inter_addr_end);
+        for (const auto& [start, end] : m_ranges) {
+            func(start, end);
         }
     }
 
+    /// The parts of the set inside [base_addr, base_addr + size), in address order. The set must
+    /// not change while it runs.
     template <typename Func>
     void ForEachInRange(VAddr base_addr, size_t size, Func&& func) const {
-        if (m_ranges_set.empty()) {
+        if (size == 0 || m_ranges.empty()) {
             return;
         }
         const VAddr start_address = base_addr;
         const VAddr end_address = start_address + size;
-        const IntervalType search_interval{start_address, end_address};
-        auto it = m_ranges_set.lower_bound(search_interval);
-        if (it == m_ranges_set.end()) {
-            return;
-        }
-        auto end_it = m_ranges_set.upper_bound(search_interval);
-        for (; it != end_it; it++) {
-            VAddr inter_addr_end = it->upper();
-            VAddr inter_addr = it->lower();
-            if (inter_addr_end > end_address) {
-                inter_addr_end = end_address;
-            }
-            if (inter_addr < start_address) {
-                inter_addr = start_address;
-            }
-            func(inter_addr, inter_addr_end);
+        for (auto it = FirstEndingAfter(start_address); it != m_ranges.end() && it->first < end_address;
+             ++it) {
+            func(std::max(it->first, start_address), std::min(it->second, end_address));
         }
     }
 
@@ -115,9 +147,36 @@ struct RangeSet {
         }
     }
 
-    IntervalSet m_ranges_set;
+private:
+    using Map = std::map<VAddr, VAddr>;
+
+    /// The first range ending after `address` (holding it, or the first one after it).
+    Map::const_iterator FirstEndingAfter(VAddr address) const {
+        auto it = m_ranges.upper_bound(address);
+        if (it != m_ranges.begin()) {
+            const auto prev = std::prev(it);
+            if (prev->second > address) {
+                return prev;
+            }
+        }
+        return it;
+    }
+    Map::iterator FirstEndingAfter(VAddr address) {
+        auto it = m_ranges.upper_bound(address);
+        if (it != m_ranges.begin()) {
+            const auto prev = std::prev(it);
+            if (prev->second > address) {
+                return prev;
+            }
+        }
+        return it;
+    }
+
+    Map m_ranges;
 };
 
+// gow3 26 Oct 2026: RangeMap and SplitRangeMap below are Boost.ICL containers with the same
+// lookups (see RangeSet): wrong over several intervals with libc++ 22. Nothing uses them.
 template <typename T>
 class RangeMap {
 public:

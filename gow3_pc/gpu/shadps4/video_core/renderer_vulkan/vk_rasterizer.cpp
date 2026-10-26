@@ -4742,6 +4742,27 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
     // will need its full emulation anyways.
     const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
 
+    // gow3 26 Oct 2026: a clear is a shader without xor writing a metadata surface; the read
+    // buffers below only rule one out. Without such a written buffer the answer is no, and the
+    // V# and metadata lookups of every read buffer are skipped (~1% of the draw recording thread
+    // in The Last of Us, ~1,800 dispatches a frame).
+    if (info.has_bitwise_xor) {
+        return false;
+    }
+    {
+        bool writes_meta = false;
+        for (const auto& desc : info.buffers) {
+            if (!desc.IsSpecial() && desc.is_written &&
+                texture_cache.IsMeta(desc.GetSharp(info).base_address)) {
+                writes_meta = true;
+                break;
+            }
+        }
+        if (!writes_meta) {
+            return false;
+        }
+    }
+
     // gow3: the cheap descriptor tests come before reading the V# (GetSharp: user data or the
     // flattened SRT, and for the effect shaders a mapped-memory query) on every dispatch; a
     // shader writing no guest buffer cannot be a metadata clear.

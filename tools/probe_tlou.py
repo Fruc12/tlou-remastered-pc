@@ -103,6 +103,13 @@ CHEATS = {
     # it is the same length, so it is written in place.
     "flashlight": [(0x697B98, "C4C17A1195D4070000", "C4C17A118DD4070000")],
 }
+# Idle job workers sleep (TLOU_JOB_SLEEP=0 keeps them spinning). The engine's 6 NdJobWorkerThreads spin on their job
+# queues with `pause` unless the job manager's sleep flag (byte +0x59) is on; with it on, an idle
+# worker waits on the manager's condition variable after 1000 spins (10 ms timeout) and every job
+# submission wakes them. On a PS4 each worker owns a core; here they took about half of their time
+# spinning (pause at 0xC87D65). The flag is treated as on in the worker loop, its re-check before
+# waiting and the submit path, as in the Uncharted ports of the same engine.
+JOB_SLEEP = [(0xC87D63, "7304", "EB04"), (0xC87D96, "741B", "9090"), (0xC873E1, "742D", "9090")]
 # Fixes, on in every run.
 FIXES = {
     # 23 Oct 2026 (the house, after the autosave before the basement): the renderer's frame
@@ -320,6 +327,8 @@ def main():
     # TLOU_CHEATS=<name>,...: the cheats above (default: flashlight; "none": no cheats).
     # TLOU_FIXES=none leaves out the fixes.
     patches = dict(FIXES) if os.environ.get("TLOU_FIXES") != "none" else {}
+    if os.environ.get("TLOU_JOB_SLEEP") != "0":
+        patches["job-sleep"] = JOB_SLEEP
     for name in [c.strip() for c in os.environ.get("TLOU_CHEATS", "flashlight").split(",") if c.strip()]:
         if name in CHEATS:
             patches[name] = CHEATS[name]

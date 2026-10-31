@@ -61,9 +61,27 @@ _Static_assert(sizeof(BatchEntry)==32,"PS4 batch map entry layout");
 /* Region table lock. Lookups (GPU per-draw queries, VirtualQuery, GPU page
  * protection) share it; map/unmap/protect take it exclusively. Both nest: code
  * under the lock may write guest memory, and a GPU-tracked page then faults into
- * runtime_memory_gpu_protect on the same thread. Readers nest because glibc's
- * default rwlock prefers readers; a thread holding it exclusively skips relocking. */
+ * runtime_memory_gpu_protect on the same thread. Readers nest because the lock
+ * prefers readers (glibc's default rwlock; rwlock_rp.h on Windows); a thread
+ * holding it exclusively skips relocking. */
+/* Windows: winpthreads' rwlock blocks new readers behind a waiting writer, so a nested reader
+ * deadlocks with it; rwlock_rp.h has glibc's reader preference. */
+#ifdef _WIN32
+#include "rwlock_rp.h"
+static RpLock lock=RP_LOCK_INITIALIZER;
+#define table_rdlock() rp_read_lock(&lock)
+#define table_wrlock() rp_write_lock(&lock)
+#define table_rdunlock() rp_read_unlock(&lock)
+#define table_wrunlock() rp_write_unlock(&lock)
+#define table_trywrlock() rp_try_write_lock(&lock)
+#else
 static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
+#define table_rdlock() pthread_rwlock_rdlock(&lock)
+#define table_wrlock() pthread_rwlock_wrlock(&lock)
+#define table_rdunlock() pthread_rwlock_unlock(&lock)
+#define table_wrunlock() pthread_rwlock_unlock(&lock)
+#define table_trywrlock() pthread_rwlock_trywrlock(&lock)
+#endif
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
 static uint64_t table_generation;
@@ -106,9 +124,9 @@ static void map_time_report(void) {
 }
 static void write_lock(void) {
     if (!exclusive_depth++) {
-        if (pthread_rwlock_trywrlock(&lock)) {
+        if (table_trywrlock()) {
             const uint64_t start=mono_ns();
-            pthread_rwlock_wrlock(&lock);
+            table_wrlock();
             __atomic_add_fetch(&mt_lock_wait_ns,mono_ns()-start,__ATOMIC_RELAXED);
             __atomic_add_fetch(&mt_lock_waits,1,__ATOMIC_RELAXED);
         }
@@ -116,10 +134,10 @@ static void write_lock(void) {
     }
 }
 static void write_unlock(void) {
-    if (!--exclusive_depth) { __atomic_add_fetch(&table_generation,1,__ATOMIC_RELEASE); pthread_rwlock_unlock(&lock); }
+    if (!--exclusive_depth) { __atomic_add_fetch(&table_generation,1,__ATOMIC_RELEASE); table_wrunlock(); }
 }
-static void read_lock(void) { if (!exclusive_depth) pthread_rwlock_rdlock(&lock); }
-static void read_unlock(void) { if (!exclusive_depth) pthread_rwlock_unlock(&lock); }
+static void read_lock(void) { if (!exclusive_depth) table_rdlock(); }
+static void read_unlock(void) { if (!exclusive_depth) table_rdunlock(); }
 static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
 #ifndef _WIN32

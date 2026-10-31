@@ -297,6 +297,9 @@ def main():
     env.setdefault("GOW3_SKIP_FILE", str(user / "skip.txt"))
     # "<lo> <hi>" (hex) in this file copies that GPU-written range back to guest memory once.
     env.setdefault("GOW3_READBACK_TRIGGER", str(user / "readback.trigger"))
+    # Tiny GPU-written images (one row, at most 4 KiB) return to guest memory with the next fence:
+    # the aim focus distance may be read from a 1x1 target; never copied back, it stays 0.
+    env.setdefault("GOW3_TINY_IMAGE_READBACK", "1")
     # Optimizations switched off while the game runs (a bit mask, src/runtime_memory.c).
     env.setdefault("GOW3_TOGGLE_FILE", str(user / "disabled-optimizations.txt"))
     if os.environ.get("TLOU_GPU_CHECKPOINTS") == "1":

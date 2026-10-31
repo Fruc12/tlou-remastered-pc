@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <stdlib.h>
 #include <bcrypt.h>
 #include <stdio.h>
 #include <string.h>
@@ -109,6 +110,40 @@ int compat_random(void *buffer, size_t size) {
 }
 
 /* One high-resolution timer per thread (Windows 10 1803+); a plain waitable timer before. */
+/* From bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port 0.7.2 (GPL-2.0-or-later):
+ * the process never asked
+ * for a timer resolution, so every timed wait outside compat_sleep_ns (condition variables with a
+ * timeout, std::this_thread::sleep_for, WaitForSingleObject(ms), the guest's timed cond/sema/equeue
+ * waits) rounded up to Windows' default 15.6 ms tick. On 4 cores the game's frame then took
+ * 9-10 ms, 16 ms or 31 ms (one or two ticks lost) while the GPU thread waited for it.
+ *   GOW3_TIMER_RES: 1 ms tick (timeBeginPeriod), DEFAULT ON since 29 Oct (A/B all 3 games x 4 cores /
+ *   Deck sim / full CPU: +9..+22% FPS; 15-minute soaks clean); GOW3_TIMER_RES=0 keeps 15.6 ms.
+ *   The process opts out of power throttling by DEFAULT (29 Oct, with the tick); GOW3_POWER_THROTTLE=1
+ *   keeps Windows' throttling (opting out = no EcoQoS
+ *   on hybrid CPUs/laptops, and Windows 11 keeps the 1 ms tick while the window is hidden). */
+#include <mmsystem.h>
+static int env_switch(const char *name, int fallback) {
+    const char *v = getenv(name);
+    return v && *v ? strcmp(v, "0") != 0 : fallback;
+}
+void runtime_host_scheduling_init(void) {
+    if (env_switch("GOW3_TIMER_RES", 1)) {
+        MMRESULT r = timeBeginPeriod(1);
+        printf("Host scheduling: 1 ms timer resolution%s (GOW3_TIMER_RES=0 keeps 15.6 ms)\n",
+               r == TIMERR_NOERROR ? "" : " REFUSED");
+    }
+    if (!env_switch("GOW3_POWER_THROTTLE", 0)) {
+        PROCESS_POWER_THROTTLING_STATE state = {0};
+        state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED |
+                            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        state.StateMask = 0; /* both controlled, both off: full speed, timer request honoured */
+        BOOL ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof state);
+        printf("Host scheduling: power throttling off%s (GOW3_POWER_THROTTLE=1 keeps it)\n",
+               ok ? "" : " - REFUSED");
+    }
+}
+
 static __thread HANDLE sleep_timer;
 void compat_sleep_ns(uint64_t ns) {
     if (!ns) { SwitchToThread(); return; }

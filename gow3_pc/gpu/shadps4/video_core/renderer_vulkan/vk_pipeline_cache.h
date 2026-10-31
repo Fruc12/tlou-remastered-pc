@@ -175,6 +175,20 @@ public:
         return used_prepared;
     }
 
+    /// gow3 26 Oct 2026 (GOW3_PARALLEL_PIPELINES=1): for a draw that goes to the recording
+    /// thread (SetPendingAllowed), a new pipeline is built on the compiler threads instead of
+    /// here: GetGraphicsPipeline returns null and TakePendingBuild the build, which the draw
+    /// carries; the recording thread waits for it (WaitPending). The builds of a burst run in
+    /// parallel and no draw is skipped. Builds stay alive until ReleasePendingBuilds (after the
+    /// recording thread is drained).
+    void SetPendingAllowed(bool allowed) noexcept {
+        pending_allowed = allowed;
+    }
+    [[nodiscard]] const void* TakePendingBuild() noexcept;
+    static std::span<const Shader::Info* const> PendingStages(const void* build);
+    static const GraphicsPipeline* WaitPending(const void* build);
+    void ReleasePendingBuilds();
+
     const ComputePipeline* GetComputePipeline();
 
     /// gow3 18 Oct 2026: compiles the compute program of a dispatch seen ahead of the GPU thread
@@ -297,6 +311,9 @@ private:
     /// gow3: StartBackgroundWarmUp state; owned here, deleted by StopWarmUp.
     BackgroundWarmup* background = nullptr;
     tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> pending_graphics;
+    bool pending_allowed = false;                              ///< GOW3_PARALLEL_PIPELINES
+    std::shared_ptr<AsyncGraphicsCompilation> last_pending;    ///< for TakePendingBuild
+    std::vector<std::shared_ptr<AsyncGraphicsCompilation>> pending_keepalive;
     /// gow3: background builds that failed (moved out of pending_graphics; never queued again).
     tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> failed_graphics;
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;

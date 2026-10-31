@@ -290,7 +290,7 @@ private:
     /// Hands a draw (or, with `cs`, a dispatch) to the recording thread.
     void PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared, bool is_indexed,
                   u32 index_offset, const AmdGpu::ComputeProgram* cs = nullptr,
-                  const IndirectDraw* indirect = nullptr);
+                  const IndirectDraw* indirect = nullptr, const void* pending = nullptr);
     /// Everything of a direct dispatch after the pipeline selection (GPU thread or stage B).
     void DispatchRecord(const ComputePipeline* pipeline);
     /// The compute registers of the dispatch being recorded.

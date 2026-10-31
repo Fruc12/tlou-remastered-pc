@@ -81,7 +81,33 @@ struct AsyncGraphicsCompilation {
     std::unique_ptr<GraphicsPipeline> pipeline;
     bool failure_logged = false;
     bool prefetch = false; ///< requested by a draw-preparation worker (GOW3_PREFETCH_PIPELINES)
+    // gow3 26 Oct 2026 (GOW3_PARALLEL_PIPELINES): set by the compiler thread when the build ends
+    // (FinishBuild, also when it throws), for the recording thread, which must not touch `job`
+    // (the GPU thread polls it).
+    std::atomic<bool> done{false};
+    const GraphicsPipeline* ready = nullptr; ///< the pipeline, unless the build failed
+    bool stages_published = false;           ///< PublishStages done by the compiler thread
 };
+
+namespace {
+/// The end of a background build: the pipeline gets its programs' own Infos (as PublishGraphics
+/// gives them) and the recording thread may use it.
+void FinishBuild(AsyncGraphicsCompilation& build) noexcept {
+    if (build.pipeline && !build.pipeline->Failed()) {
+        build.pipeline->PublishStages(build.live_infos);
+        build.stages_published = true;
+        build.ready = build.pipeline.get();
+    }
+    build.done.store(true, std::memory_order_release);
+    build.done.notify_all();
+}
+struct FinishOnExit {
+    AsyncGraphicsCompilation& build;
+    ~FinishOnExit() {
+        FinishBuild(build);
+    }
+};
+} // namespace
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
@@ -654,7 +680,9 @@ void PipelineCache::PublishGraphics(bool wait) {
         if (build->prefetch) {
             prefetch_stats[2].fetch_add(1, std::memory_order_relaxed);
         }
-        build->pipeline->PublishStages(build->live_infos);
+        if (!build->stages_published) {
+            build->pipeline->PublishStages(build->live_infos);
+        }
         RegisterPipelineData(key, std::hash<GraphicsPipelineKey>{}(key), build->data);
         graphics_pipelines.emplace(key, std::move(build->pipeline));
         ++num_new_pipelines;
@@ -1047,6 +1075,21 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
 
 namespace {
 // gow3 22 Oct 2026: GOW3_PREFETCH_PIPELINES=1 (PipelineCache::PrefetchGraphicsPipeline).
+// gow3 26 Oct 2026: GOW3_PARALLEL_PIPELINES=1 (PipelineCache::SetPendingAllowed).
+bool ParallelPipelines() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_PARALLEL_PIPELINES");
+        const bool enabled = env && env[0] == '1';
+        if (enabled) {
+            std::printf("GPU: new graphics pipelines are built on the compiler threads, the draw "
+                        "recording thread waiting for them (GOW3_PARALLEL_PIPELINES=1)\n");
+            std::fflush(stdout);
+        }
+        return enabled;
+    }();
+    return on;
+}
+
 bool PrefetchPipelines() {
     static const bool on = [] {
         const char* env = std::getenv("GOW3_PREFETCH_PIPELINES");
@@ -1127,6 +1170,29 @@ void PipelineCache::PrefetchGraphicsPipeline(const PipelineSelection& worker_sel
     prefetch_inbox_size.store(static_cast<u32>(prefetch_inbox.size()), std::memory_order_release);
 }
 
+const void* PipelineCache::TakePendingBuild() noexcept {
+    const void* build = last_pending.get();
+    last_pending.reset();
+    return build;
+}
+
+std::span<const Shader::Info* const> PipelineCache::PendingStages(const void* build) {
+    const auto& live = static_cast<const AsyncGraphicsCompilation*>(build)->live_infos;
+    return {live.data(), live.size()};
+}
+
+const GraphicsPipeline* PipelineCache::WaitPending(const void* build) {
+    auto& b = *static_cast<const AsyncGraphicsCompilation*>(build);
+    while (!b.done.load(std::memory_order_acquire)) {
+        b.done.wait(false, std::memory_order_acquire);
+    }
+    return b.ready;
+}
+
+void PipelineCache::ReleasePendingBuilds() {
+    pending_keepalive.clear();
+}
+
 void PipelineCache::DrainPrefetch() {
     if (prefetch_inbox_size.load(std::memory_order_acquire) == 0) {
         return;
@@ -1154,6 +1220,7 @@ void PipelineCache::DrainPrefetch() {
             return;
         }
         const bool queued = build->job.Start(*compiler, [this, build] {
+            FinishOnExit finish{*build};
             // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
             Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
             PhaseTimer compile{g_gow3_async_ns};
@@ -1198,6 +1265,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             return used(pipeline);
         }
     }
+    last_pending.reset();
     sel.draw_indirect_params = params;
     sync_compile = SmallTargetDraw(liverpool->regs);
     struct SyncReset {
@@ -1235,6 +1303,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 }
             }
             const bool queued = build->job.Start(*compiler, [this, build] {
+                FinishOnExit finish{*build};
                 // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
                 Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
                 PhaseTimer compile{g_gow3_async_ns};
@@ -1251,6 +1320,54 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         ++g_gow3_pending_draws;
         return nullptr;
+    }
+    // gow3 26 Oct 2026 (GOW3_PARALLEL_PIPELINES=1): a new pipeline (or one building already) for a
+    // draw the recording thread runs: built in the background, the draw carries the build. In
+    // a new area the GPU thread compiled ~1,400 pipelines one after another (~77 ms each on a
+    // laptop, up to 191 in one 8.7 s frame); now they build on the compiler threads at once.
+    if (pending_allowed && ParallelPipelines() && compiler && !sel.regs->stage_enable.hs_en &&
+        !EmulatorSettings.IsShaderCollect() && !graphics_pipelines.contains(sel.graphics_key)) {
+        const auto pend = [&](std::shared_ptr<AsyncGraphicsCompilation> build) {
+            pending_keepalive.push_back(build);
+            last_pending = std::move(build);
+            return nullptr;
+        };
+        if (const auto pending = pending_graphics.find(sel.graphics_key);
+            pending != pending_graphics.end()) {
+            return pend(pending.value());
+        }
+        if ((failed_graphics.empty() || !failed_graphics.contains(sel.graphics_key)) &&
+            compiler->HasCapacity()) {
+            auto build = std::make_shared<AsyncGraphicsCompilation>();
+            build->selection = sel;
+            build->selection.regs = nullptr;
+            build->live_infos = sel.infos;
+            for (u32 i = 0; i < MaxShaderStages; ++i) {
+                if (sel.infos[i]) {
+                    build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
+                    build->user_data[i].assign(sel.infos[i]->user_data.begin(),
+                                               sel.infos[i]->user_data.end());
+                    build->infos[i]->user_data = build->user_data[i];
+                    build->selection.infos[i] = build->infos[i].get();
+                    build->fetch[i].Capture(*build->infos[i]);
+                }
+            }
+            const bool queued = build->job.Start(*compiler, [this, build] {
+                FinishOnExit finish{*build};
+                Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
+                PhaseTimer compile{g_gow3_async_ns};
+                auto& s = build->selection;
+                build->pipeline = std::make_unique<GraphicsPipeline>(
+                    instance, scheduler, desc_heap, profile, s.graphics_key,
+                    *worker_pipeline_caches[AsyncCompiler::WorkerIndex()], s.infos, s.runtime_infos,
+                    s.fetch_shader, s.modules, build->data, false);
+                return build;
+            }, true);
+            if (queued) {
+                pending_graphics.emplace(sel.graphics_key, build);
+                return pend(std::move(build));
+            }
+        }
     }
     if (sync_compile || !pending_graphics.empty()) {
         // Queued in the background earlier (or by a worker's prefetch): waited for, not

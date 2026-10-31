@@ -1324,6 +1324,7 @@ struct TaskPacket {
 struct DrawPacket {
     PacketKind kind;
     const Pipeline* pipeline;
+    const void* pending; ///< (GOW3_PARALLEL_PIPELINES) the pipeline's build, when not built yet
     const PreparedDraw* prepared;
     u32 index_offset;
     u8 is_indexed;
@@ -1727,7 +1728,7 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
 
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
-                          const IndirectDraw* indirect) {
+                          const IndirectDraw* indirect, const void* pending) {
     auto& dirty = liverpool->pipe_dirty;
     if (!pipe_synced) {
         // Stage B has not run yet: its register copy starts as this one.
@@ -1738,8 +1739,9 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     std::array<u16, AmdGpu::RegDirty::NumBlocks> blocks;
     u32 num_blocks = 0;
     dirty.ForEach([&](u32 block) { blocks[num_blocks++] = static_cast<u16>(block); });
-    const auto stages =
-        pipeline ? pipeline->GetStages() : std::span<const Shader::Info* const>{};
+    const auto stages = pipeline  ? pipeline->GetStages()
+                        : pending ? PipelineCache::PendingStages(pending)
+                                  : std::span<const Shader::Info* const>{};
     // Constants: copied here into the ring, the recording thread only binds them.
     thread_local std::array<boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>,
                             Shader::MaxStageTypes>
@@ -1781,9 +1783,10 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     auto& packet = *reinterpret_cast<DrawPacket*>(out);
     packet.kind = cs         ? (indirect ? PacketKind::IndirectDispatch : PacketKind::Dispatch)
                   : indirect ? PacketKind::Indirect
-                  : pipeline ? PacketKind::Draw
-                             : PacketKind::Special;
+                  : pipeline || pending ? PacketKind::Draw
+                                        : PacketKind::Special;
     packet.pipeline = pipeline;
+    packet.pending = pending;
     packet.prepared = used_prepared;
     packet.index_offset = index_offset;
     packet.is_indexed = is_indexed;
@@ -2021,8 +2024,15 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         self.DrawIndirectRecord(static_cast<const GraphicsPipeline*>(packet.pipeline),
                                 packet.is_indexed, *indirect);
     } else {
-        self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
-                        packet.is_indexed, packet.index_offset);
+        // GOW3_PARALLEL_PIPELINES: a pipeline still building is waited for here (a failed
+        // build skips the draw, as a pipeline the driver refuses).
+        const auto* pipeline = static_cast<const GraphicsPipeline*>(packet.pipeline);
+        if (!pipeline && packet.pending) {
+            pipeline = PipelineCache::WaitPending(packet.pending);
+        }
+        if (pipeline) {
+            self.DrawRecord(pipeline, packet.prepared, packet.is_indexed, packet.index_offset);
+        }
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
@@ -2130,14 +2140,18 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
             return;
         }
     }
+    // GOW3_PARALLEL_PIPELINES: a draw for the recording thread may carry a pipeline build.
+    pipeline_cache.SetPendingAllowed(pipelined && FilterDrawPasses());
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
+    pipeline_cache.SetPendingAllowed(false);
+    const void* pending = pipeline ? nullptr : pipeline_cache.TakePendingBuild();
     const PreparedDraw* used_prepared = pipeline_cache.UsedPrepared();
     if (prepared) {
         draw_prep->Count(pipeline != nullptr &&
                          prepared->state.load(std::memory_order_acquire) == PreparedDraw::Ready &&
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
     }
-    if (!pipeline) {
+    if (!pipeline && !pending) {
         // gow3 21 Oct 2026 (a carpet never drawn, the scene's background red
         // through it): which draws find no pipeline, by their stage programs, per 5 s.
         static std::unordered_map<u64, u32> dropped;
@@ -2166,7 +2180,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         return;
     }
     if (pipelined && FilterDrawPasses()) {
-        PostDraw(pipeline, used_prepared, is_indexed, index_offset);
+        PostDraw(pipeline, used_prepared, is_indexed, index_offset, nullptr, nullptr, pending);
         return;
     }
     DrawRecord(pipeline, used_prepared, is_indexed, index_offset);
@@ -3307,6 +3321,7 @@ void Rasterizer::PeekSkinOutputs() {
 
 void Rasterizer::OnSubmit() {
     DrainDrawPipe();
+    pipeline_cache.ReleasePendingBuilds(); // (the recording thread is done with them)
     buffer_cache.ReclaimArenaMemory();
     buffer_cache.PollPeeks();
     if (VideoCore::BufferCache::BoneTraceEnabled()) {

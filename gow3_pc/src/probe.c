@@ -7,6 +7,7 @@
 #include <inttypes.h>
 #include "runtime.h"
 #include "cpu_check.h"
+#include "red_zone.h"
 #include "orb_hook.h"
 #include "cheat_hook.h"
 #include "actor_hook.h"
@@ -54,6 +55,9 @@ static uint64_t read64(FILE *f) {
     for (int i = 7; i >= 0; --i) n = (n << 8) | b[i];
     return n;
 }
+/* Red-zone protection (scripts/red_zone.py): guest code keeps data in the 128 bytes below rsp and
+ * Windows writes its exception frame there on every GPU page-tracking fault. */
+static RedZoneTable *red_zone;
 static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_size - 1); }
 static void *allocate(size_t size) {
     void *low=runtime_low_map(size,PROT_READ|PROT_WRITE);
@@ -124,6 +128,11 @@ static ABI void guest_exit(void) { puts("Runtime: process finalizer callback rea
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
     char name[MAX_PATH]="?";
+    uint64_t protected_site;
+    if (red_zone_site_of_stub(red_zone,address,&protected_site)) {
+        snprintf(out,size,"guest offset 0x%" PRIx64 " (red-zone stub)",protected_site);
+        return;
+    }
     if (image && address-(uintptr_t)image<0x20000000) { snprintf(out,size,"guest offset 0x%" PRIxPTR,address-(uintptr_t)image); return; }
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)address,&module) && module) {
         GetModuleFileNameA(module,name,sizeof(name));
@@ -432,6 +441,17 @@ static void cover_current_stack(const CONTEXT *context) {
     }
     tib->StackLimit=(PVOID)low; tib->StackBase=(PVOID)high;
 }
+/* GOW3_RED_ZONE_STATS=1: of the faults guest code took, how many were protected instructions. */
+static void note_red_zone_fault(uintptr_t rip) {
+    static int on=-1;
+    if (on<0) { const char *env=getenv("GOW3_RED_ZONE_STATS"); on=env && env[0]=='1'; }
+    if (!on || !red_zone || rip-(uintptr_t)image>=0x20000000) return;
+    static uint64_t total, in_stubs;
+    const uint64_t n=__atomic_add_fetch(&total,1,__ATOMIC_RELAXED);
+    const int stub=rip-(uintptr_t)red_zone->rz_area<red_zone->rz_code_bytes;
+    const uint64_t s=stub ? __atomic_add_fetch(&in_stubs,1,__ATOMIC_RELAXED) : __atomic_load_n(&in_stubs,__ATOMIC_RELAXED);
+    if (!(n&8191)) printf("Red zone: %" PRIu64 " of %" PRIu64 " guest faults came from protected instructions\n",s,n);
+}
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
@@ -475,7 +495,10 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
             ++handler_depth;
             const int handled=gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1]);
             --handler_depth;
-            if (handled) return EXCEPTION_CONTINUE_EXECUTION;
+            if (handled) {
+                note_red_zone_fault((uintptr_t)info->ContextRecord->Rip);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
         if (runtime_fault_recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
@@ -980,7 +1003,7 @@ int main(int argc, char **argv) {
     const char *guest_argv[17]={"/app0/eboot.bin"};
     int guest_argc=1;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *red_zone_file=NULL;
     const char *app0_overlays[4]; int app0_overlay_count=0;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
@@ -996,6 +1019,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
+        else if (!strcmp(argv[i], "--red-zone") && i+1<argc) red_zone_file=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else if (!strcmp(argv[i], "--guest-path") && i+1<argc) guest_argv[0]=argv[++i];
         else if (!strcmp(argv[i], "--guest-arg") && i+1<argc) {
@@ -1163,10 +1187,24 @@ int main(int argc, char **argv) {
             if (!executable) fail("native function is not executable");
         }
     }
-    image = low_image ? allocate_low_image(round_page(size)) : allocate(round_page(size));
+    /* The red-zone stubs follow the image (rel32 jmps reach them). */
+#ifdef _WIN32
+    if (red_zone_file) red_zone=red_zone_load(red_zone_file);
+    if (red_zone && red_zone->rz_code_offset!=round_page(size)) {
+        printf("Red zone: protection unavailable (stub offset does not match this page size)\n");
+        red_zone=NULL;
+    }
+#endif
+    const size_t red_zone_area = red_zone ? round_page(red_zone_code_size(red_zone)) : 0;
+    const size_t image_area = round_page(size) + red_zone_area;
+    image = low_image ? allocate_low_image(image_area) : allocate(image_area);
     printf("Guest image base: %p (%s)\n",image,low_image ? "below 2 GiB" : "default range");
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+    if (red_zone && !red_zone_matches(red_zone, image, size)) {
+        printf("Red zone: protection unavailable (the table is for another image)\n");
+        red_zone = NULL;
+    }
     if (!cpu_only) {
         char title[128]="The Last of Us Remastered", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
@@ -1239,6 +1277,13 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
+    /* Last: a group whose bytes a patch, a hook or the TCB rewrite changed is skipped whole. */
+    if (red_zone) {
+        const RedZoneReport report = red_zone_apply(red_zone, image, image + round_page(size));
+        printf("Red zone: %u instructions protected in %u patches (%u through relays), %u patches skipped\n",
+               report.protected_instructions, report.groups, report.short_relays, report.skipped);
+        protect(image + round_page(size), red_zone_area, 5);
+    }
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;

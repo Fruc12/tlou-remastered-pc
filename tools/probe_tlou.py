@@ -195,6 +195,13 @@ def main():
     scripts = ROOT / "gow3_pc/scripts"
     for script in ("prepare.py", "link_modules.py", "content_profile.py"):
         subprocess.run([sys.executable, str(scripts / script), str(view), "--out", str(out)], check=True)
+    # Windows red-zone protection (gow3_pc/scripts/red_zone.py): GOW3_RED_ZONE_REWRITE=0 turns it off.
+    red_zone = None
+    if os.environ.get("GOW3_RED_ZONE_REWRITE") != "0":
+        table = subprocess.run([sys.executable, str(scripts / "red_zone_table.py"), str(out / "boot-linked.bin"),
+                                "--out", str(out)])
+        if table.returncode == 0:
+            red_zone = out / "red-zone.bin"
 
     env = dict(os.environ)
     msys = Path(os.environ.get("MSYS2_ROOT", "C:/msys64"))
@@ -313,6 +320,8 @@ def main():
         patch_file = image_patches(out / "eboot.elf", out / "patches.bin", patches)
         if patch_file:
             command += ["--patches", str(patch_file)]
+    if red_zone:
+        command += ["--red-zone", str(red_zone)]
     if not args.boot:
         command.append("--check-imports")
     if args.cpu_only:

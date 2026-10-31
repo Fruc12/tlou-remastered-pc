@@ -3037,6 +3037,28 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (ExecuteShaderHLE(cs, Regs(), cs_program, *this)) {
         return;
     }
+    // gow3 31 Oct 2026 (GOW3_NO_MOTION_BLUR=1, The Last of Us): the two motion blur shaders run on
+    // cleared velocity buffers (RG16F, camera dd3851a0, objects eeec117), so they blur nothing.
+    // Skipping them instead left the final composite blending their last image forever.
+    static const bool no_motion_blur = [] {
+        const char* env = std::getenv("GOW3_NO_MOTION_BLUR");
+        return env && env[0] == '1';
+    }();
+    if (no_motion_blur && (cs.pgm_hash == 0xdd3851a0 || cs.pgm_hash == 0x0eeec117)) {
+        for (const auto& image_desc : cs.images) {
+            if (image_desc.is_written) {
+                continue;
+            }
+            const auto tsharp = image_desc.GetSharp(cs);
+            if (tsharp.GetDataFmt() != AmdGpu::DataFormat::Format16_16 ||
+                tsharp.GetNumberFmt() != AmdGpu::NumberFormat::Float) {
+                continue;
+            }
+            VideoCore::TextureCache::ImageDesc desc(tsharp, image_desc);
+            auto& image = texture_cache.GetImage(texture_cache.FindImage(desc));
+            runtime.ClearImage(&image, desc.view_info.range, vk::ClearValue{});
+        }
+    }
     // gow3 diagnostics (GOW3_DUMP_CS_CONST=<hex shader hash>): the first 32 dwords (as floats) of
     // every buffer the dispatch reads that is up to 4 KiB, with a timestamp, 2000 lines at most.
     static const u64 dump_cs = [] {

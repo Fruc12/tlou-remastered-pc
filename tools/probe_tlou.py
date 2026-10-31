@@ -304,6 +304,8 @@ def main():
     # buffers instead of freeing them (~16% of that thread) and small per-draw savings: 39.9 -> 43.4 FPS.
     env.setdefault("GOW3_PREP_POOL", "1")
     env.setdefault("GOW3_CPU_TRIMS", "1")
+    # The game's motion blur off (GOW3_NO_MOTION_BLUR=0 keeps it): its shaders see no movement.
+    env.setdefault("GOW3_NO_MOTION_BLUR", "1")
     # Optimizations switched off while the game runs (a bit mask, src/runtime_memory.c).
     env.setdefault("GOW3_TOGGLE_FILE", str(user / "disabled-optimizations.txt"))
     if os.environ.get("TLOU_GPU_CHECKPOINTS") == "1":

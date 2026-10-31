@@ -463,8 +463,15 @@ u32 Gow3DisplayRefreshHz() {
 }
 
 #ifdef GOW3_PGO_GENERATE
+#ifdef GOW3_PGO_LLVM
+extern "C" int __llvm_profile_write_file(void);
+extern "C" void __llvm_profile_reset_counters(void);
+#define __gcov_dump __llvm_profile_write_file
+#define __gcov_reset __llvm_profile_reset_counters
+#else
 extern "C" void __gcov_dump(void);
 extern "C" void __gcov_reset(void);
+#endif
 // Instrumented build (GOW3_PGO=generate): the game often ends through _exit (watchdog, guest
 // exit), which skips the profile write at exit. Write every 30 s and reset: the files sum the
 // intervals.

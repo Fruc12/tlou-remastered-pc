@@ -27,7 +27,18 @@ if (GOW3_LTO)
         message(WARNING "LTO unavailable: ${gow3_ipo_error}")
     endif()
 endif()
-if (GOW3_PGO STREQUAL "generate")
+if (GOW3_PGO STREQUAL "generate" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # gow3 31 Oct 2026 (clang, MSYS2 on Windows): the same with LLVM's profiles. Raw profiles
+    # are merged into ${GOW3_PGO_DIR}/tlou.profdata with llvm-profdata.
+    add_compile_options(-fprofile-generate=${GOW3_PGO_DIR} -fprofile-update=atomic)
+    add_link_options(-fprofile-generate=${GOW3_PGO_DIR})
+    add_compile_definitions(GOW3_PGO_GENERATE GOW3_PGO_LLVM)
+elseif (GOW3_PGO STREQUAL "use" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Functions changed since the profile are compiled without it.
+    add_compile_options(-fprofile-use=${GOW3_PGO_DIR}/tlou.profdata -Wno-profile-instr-out-of-date
+                        -Wno-profile-instr-unprofiled -Wno-backend-plugin)
+    add_link_options(-fprofile-use=${GOW3_PGO_DIR}/tlou.profdata)
+elseif (GOW3_PGO STREQUAL "generate")
     # Atomic counters: the GPU, recording, preparation and copy threads run the same code.
     add_compile_options(-fprofile-generate=${GOW3_PGO_DIR} -fprofile-update=atomic)
     add_link_options(-fprofile-generate=${GOW3_PGO_DIR})
@@ -218,6 +229,12 @@ if (WIN32)
     target_compile_options(range-names-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_include_directories(range-names-test PRIVATE .. ../src)
     target_link_libraries(range-names-test PRIVATE onecore bcrypt -pthread)
+    # gow3 31 Oct 2026: with PGO and LTO the game stopped in SwitchToFiber at boot: a fiber resumes
+    # with its stack switched by hand, code the optimizer must not see through.
+    if (GOW3_PGO STREQUAL "use" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set_source_files_properties(shim/gow3_fiber.cpp shim/gow3_fiber_context.cpp PROPERTIES
+                                    COMPILE_OPTIONS "-fno-profile-use;-fno-lto")
+    endif()
     add_executable(fiber-test EXCLUDE_FROM_ALL ../tests/test_fiber.cpp shim/gow3_fiber.cpp shim/gow3_fiber_context.cpp)
     target_compile_options(fiber-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_link_libraries(fiber-test PRIVATE -pthread)

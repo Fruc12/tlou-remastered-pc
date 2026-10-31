@@ -300,6 +300,10 @@ def main():
     # Tiny GPU-written images (one row, at most 4 KiB) return to guest memory with the next fence:
     # the aim focus distance may be read from a 1x1 target; never copied back, it stays 0.
     env.setdefault("GOW3_TINY_IMAGE_READBACK", "1")
+    # The GPU command thread is the limit in heavy areas (0% idle, ~29 FPS). Submissions reuse their
+    # buffers instead of freeing them (~16% of that thread) and small per-draw savings: 39.9 -> 43.4 FPS.
+    env.setdefault("GOW3_PREP_POOL", "1")
+    env.setdefault("GOW3_CPU_TRIMS", "1")
     # Optimizations switched off while the game runs (a bit mask, src/runtime_memory.c).
     env.setdefault("GOW3_TOGGLE_FILE", str(user / "disabled-optimizations.txt"))
     if os.environ.get("TLOU_GPU_CHECKPOINTS") == "1":

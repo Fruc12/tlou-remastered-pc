@@ -49,7 +49,17 @@ struct RangeSet {
         if (it != m_ranges.begin()) {
             const auto prev = std::prev(it);
             if (prev->second >= start) {
-                it = prev;
+                // Most adds rewrite a range the set holds or grow one: no node is freed and
+                // allocated for them (the draw recording thread adds per written buffer).
+                if (prev->second >= end) {
+                    return;
+                }
+                while (it != m_ranges.end() && it->first <= end) {
+                    end = std::max(end, it->second);
+                    it = m_ranges.erase(it);
+                }
+                prev->second = end;
+                return;
             }
         }
         while (it != m_ranges.end() && it->first <= end) {

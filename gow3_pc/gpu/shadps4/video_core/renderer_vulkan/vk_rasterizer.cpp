@@ -1498,9 +1498,18 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
             pending_copy_writes.push_back({address, end, copy_position});
         }
     }
-    for (u32 i = 0; i < pending_writes.size(); ++i) {
+    // gow3 31 Oct 2026: 9% of the GPU command thread in a heavy area was this walk. A range no
+    // pending write can touch skips it (one that only touches an entry across a granule stays a
+    // new entry, which is harmless), and the walk starts at the entry found last.
+    const u32 count = PendingFilterHit(address, end)
+                          ? static_cast<u32>(pending_writes.size())
+                          : 0;
+    const u32 first = pending_hint < count ? pending_hint : 0;
+    for (u32 step = 0; step < count; ++step) {
+        const u32 i = first + step < count ? first + step : first + step - count;
         auto& write = pending_writes[i];
         if (address <= write.end && write.begin <= end) {
+            pending_hint = i;
             write.begin = std::min(write.begin, address);
             write.end = std::max(write.end, end);
             write.position = position;

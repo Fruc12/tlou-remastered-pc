@@ -4421,16 +4421,20 @@ bool BufferCache::DeferUntilLastReadback(std::function<void()> fn, VAddr label, 
             std::fflush(stdout);
         }
     }
-    fn = [fn = std::move(fn), start = std::chrono::steady_clock::now()] {
-        const u64 us = std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::steady_clock::now() - start)
-                           .count();
-        g_deferred_us += us;
-        u64 max = g_deferred_max_us.load();
-        while (us > max && !g_deferred_max_us.compare_exchange_weak(max, us)) {
-        }
-        fn();
-    };
+    // (A wrapper is a heap allocation per fence: only with the fault statistics.)
+    static const bool timed = std::getenv("GOW3_FAULT_STATS") != nullptr;
+    if (timed) {
+        fn = [fn = std::move(fn), start = std::chrono::steady_clock::now()] {
+            const u64 us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
+            g_deferred_us += us;
+            u64 max = g_deferred_max_us.load();
+            while (us > max && !g_deferred_max_us.compare_exchange_weak(max, us)) {
+            }
+            fn();
+        };
+    }
     if (label) {
         const u32 label_bytes = bytes ? bytes : 4u;
         {

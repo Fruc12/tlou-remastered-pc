@@ -669,6 +669,7 @@ private:
     /// there, so PendingWriteOverlaps returns without walking the list.
     static constexpr u32 PendingGranuleBits = 16;
     static constexpr u32 PendingFilterBits = 4096;
+    u32 pending_hint = 0; ///< the pending write NotePendingGpuWrite found last
     std::array<u64, PendingFilterBits / 64> pending_filter{};
     void FilterPendingRange(VAddr begin, VAddr end);
     bool PendingFilterHit(VAddr begin, VAddr end) const;

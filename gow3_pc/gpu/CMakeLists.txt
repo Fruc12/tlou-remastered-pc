@@ -10,6 +10,8 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 # Frame pointers keep the loader's thread dumps (watchdog, SIGUSR2 sampling) walkable.
 add_compile_options(-fno-omit-frame-pointer)
+# gow3: asserts and logs name sources from the repository, not from the folder of the build.
+add_compile_options(-fmacro-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=gpu)
 
 # gow3: link-time optimization (GOW3_LTO, default on) and profile-guided optimization
 # (GOW3_PGO: off, generate = instrumented build writing into GOW3_PGO_DIR, use = build with that

@@ -1,0 +1,39 @@
+The Last of Us Remastered - PC port (CUSA00552, update 1.11)
+
+PORTUGUÊS
+
+Este pacote NÃO traz nenhum arquivo do jogo. Você precisa da sua própria cópia descriptografada.
+
+Requisitos: Windows 10/11 de 64 bits e placa de vídeo com Vulkan. Não precisa instalar Python.
+
+1. Extraia o zip em uma pasta com bastante espaço livre, sem acentos no caminho, de preferência.
+2. Abra "TLOU Launcher.exe".
+3. Clique em "Pastas" e escolha "Arquivos do jogo": a pasta que tem o eboot.bin.
+   A atualização 1.11 é procurada ao lado dela, na pasta de mesmo nome com "-patch" no fim
+   (por exemplo, CUSA00552 e CUSA00552-patch).
+4. Clique em JOGAR. A primeira vez demora mais, porque os shaders são compilados; podem
+   aparecer travadas até eles entrarem no cache.
+
+Se o jogo oscilar, teste o limite de 30 FPS no launcher: o movimento fica mais regular.
+Saves, configurações e logs ficam em analysis\ dentro desta pasta. Ao atualizar o port,
+guarde essa pasta. O log é analysis\tlou\boot.log (botão "Abrir log").
+
+ENGLISH
+
+This package has NO game files. You need your own decrypted copy of the game.
+
+Requirements: 64-bit Windows 10/11 and a Vulkan graphics card. No Python install is needed.
+
+1. Extract the zip to a folder with plenty of free space.
+2. Open "TLOU Launcher.exe".
+3. Click "Folders" and choose "Game files": the folder with eboot.bin. Update 1.11 is looked for
+   beside it, in the folder of the same name ending in "-patch" (CUSA00552 and CUSA00552-patch).
+4. Click PLAY. The first start takes longer while shaders compile, and you may see stutters until
+   they are in the cache.
+
+If the frame rate swings, try the 30 FPS limit in the launcher: motion gets more even.
+Saves, settings and logs are in analysis\ inside this folder. Keep it when you update the port.
+The log is analysis\tlou\boot.log ("Open log").
+
+Not affiliated with Sony, Naughty Dog or any other rights holder.
+GNU GPL v2 or later (LICENSE.txt); the licenses folder lists the bundled libraries.

@@ -1,6 +1,7 @@
-/* TLOU Launcher.exe: opens the game launcher (tlou_launcher.pyw) from its own folder. No console
- * window. Python comes from the PATH: the game's preparation scripts need it anyway. Extra
- * arguments are passed on. */
+/* TLOU Launcher.exe: opens the game launcher (tlou_launcher.pyw). No console window. In the
+ * repository it sits beside the launcher and Python comes from the PATH; in a release package
+ * (tools/package_windows.sh) it sits at the top, over launcher\ and python\. Extra arguments are
+ * passed on. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdlib.h>
@@ -12,7 +13,7 @@
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int show)
 {
     (void)instance, (void)previous, (void)show;
-    static wchar_t dir[32768], script[32768], line[32768], shell[MAX_PATH];
+    static wchar_t dir[32768], script[32768], line[32768], shell[MAX_PATH], packaged[32768];
     DWORD length = GetModuleFileNameW(NULL, dir, 32768);
     if (length == 0 || length >= 32768)
         return 1;
@@ -20,6 +21,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     if (slash)
         *slash = 0;
     swprintf(script, 32768, L"%ls\\tlou_launcher.pyw", dir);
+    if (GetFileAttributesW(script) == INVALID_FILE_ATTRIBUTES)
+        swprintf(script, 32768, L"%ls\\launcher\\tlou_launcher.pyw", dir);
     if (GetFileAttributesW(script) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(NULL, L"tlou_launcher.pyw n\u00e3o foi encontrado ao lado deste arquivo.", TITLE,
                     MB_OK | MB_ICONERROR);
@@ -28,8 +31,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     /* Through cmd.exe: a version manager's pythonw on the PATH may be a batch file. */
     if (!GetEnvironmentVariableW(L"ComSpec", shell, MAX_PATH))
         wcscpy(shell, L"C:\\Windows\\System32\\cmd.exe");
-    swprintf(line, 32768, L"\"%ls\" /c pythonw \"tlou_launcher.pyw\"%ls%ls", shell,
-             arguments && *arguments ? L" " : L"", arguments ? arguments : L"");
+    swprintf(packaged, 32768, L"%ls\\python\\pythonw.exe", dir);
+    if (GetFileAttributesW(packaged) != INVALID_FILE_ATTRIBUTES)
+        swprintf(line, 32768, L"\"%ls\" /c \"\"%ls\" \"%ls\"%ls%ls\"", shell, packaged, script,
+                 arguments && *arguments ? L" " : L"", arguments ? arguments : L"");
+    else
+        swprintf(line, 32768, L"\"%ls\" /c pythonw \"%ls\"%ls%ls", shell, script,
+                 arguments && *arguments ? L" " : L"", arguments ? arguments : L"");
 
     STARTUPINFOW startup = {.cb = sizeof(startup)};
     PROCESS_INFORMATION process;

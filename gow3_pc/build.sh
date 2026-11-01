@@ -3,7 +3,7 @@ set -euo pipefail
 cd -- "$(dirname -- "$0")"
 mkdir -p out
 # Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
-# there and CMake links gow3-probe.exe as well; PGO and LTO only on request (GOW3_PGO=use).
+# there and CMake links gow3-probe.exe as well; PGO and LTO with pgo/tlou.profdata.
 case $(uname -s) in
 MINGW*|MSYS*)
     # shellcheck source=msys2-env.sh
@@ -20,9 +20,13 @@ MINGW*|MSYS*)
             git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
         fi
     done
-    # GOW3_PGO=use builds with pgo/tlou.profdata and LTO: 37 -> 40 FPS in the heavy area, but NPCs
-    # jumped while walking (31 Oct 2026, the player, only with that build), so it stays opt-in.
-    pgo=${GOW3_PGO:-off}
+    # pgo/tlou.profdata (trained in the heavy area, git-ignored): 39.6 -> 43.5 FPS there. GOW3_PGO=off
+    # for quick development builds (no link-time optimization). Without the file the build is plain.
+    # A new profile needs a clean build (ninja -t clean), or the link fails on ProfileSummary.
+    pgo=${GOW3_PGO:-}
+    if [[ -z $pgo ]]; then
+        if [[ -f pgo/tlou.profdata ]]; then pgo=use; else pgo=off; fi
+    fi
     if [[ $pgo == use ]]; then lto=${GOW3_LTO:-ON}; else lto=${GOW3_LTO:-OFF}; fi
     cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGOW3_PGO="$pgo" \
         -DGOW3_PGO_DIR="$(cygpath -m "$PWD/pgo")" -DGOW3_LTO="$lto" \

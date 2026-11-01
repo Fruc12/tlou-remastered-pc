@@ -6,6 +6,7 @@
 *.pkg
 /analysis/*
 /gow3_pc/out/
-/TLOU Launcher.exe
+/launcher/TLOU Launcher.exe
+/launcher/assets/
 __pycache__/
 *.pyc

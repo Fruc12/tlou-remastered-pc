@@ -38,9 +38,15 @@ MINGW*|MSYS*)
     fi
     cp out/gpu/gow3-probe.exe out/gpu/gow3-gpu-capabilities.exe out/
     echo "Built $PWD/out/gow3-probe.exe"
-    clang -O2 -Wall -Wextra -Werror -static -municode -mwindows packaging/windows/tlou-launcher.c \
-        -o "../TLOU Launcher.exe"
-    echo "Built $(dirname "$PWD")/TLOU Launcher.exe"
+    # The launcher's icon is the player's own picture (launcher/assets, not in the repository).
+    launcher_icon=()
+    if [[ -f ../launcher/assets/icon.ico ]]; then
+        windres -I ../launcher ../launcher/tlou-launcher.rc -O coff -o out/tlou-launcher-icon.o
+        launcher_icon=(out/tlou-launcher-icon.o)
+    fi
+    clang -O2 -Wall -Wextra -Werror -static -municode -mwindows ../launcher/tlou-launcher.c \
+        "${launcher_icon[@]}" -o "../launcher/TLOU Launcher.exe"
+    echo "Built $(dirname "$PWD")/launcher/TLOU Launcher.exe"
     exit 0
     ;;
 esac

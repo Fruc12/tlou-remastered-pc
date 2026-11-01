@@ -5,6 +5,7 @@ are), keeps its own switches in launcher.json beside it and starts tools/probe_t
 Usage: tlou_launcher.pyw [--seconds N] [--close-after S]   (for tests: a time limit for the game, and
 for the launcher's window; default none)
 """
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,9 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-ROOT = Path(__file__).resolve().parent.parent
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+ICON = HERE / "assets/icon.ico"   # made from the player's own picture, not in the repository
 USER = ROOT / "analysis/tlou-user"
 INI = USER / "tlou.ini"
 SWITCHES = USER / "launcher.json"
@@ -414,7 +417,11 @@ class Launcher(tk.Tk):
     WIDTH, HEIGHT = 1180, 636
 
     def __init__(self, seconds=0):
+        # Its own taskbar entry and icon, not those of pythonw.exe.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TLOU.Remastered.Launcher")
         super().__init__()
+        if ICON.is_file():
+            self.iconbitmap(default=str(ICON))   # also the windows opened from this one
         self.seconds = seconds
         self.process = None
         self.overrides = read_overrides()

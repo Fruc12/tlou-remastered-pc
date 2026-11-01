@@ -1,6 +1,6 @@
-/* TLOU Launcher.exe: opens the game launcher (tools/tlou_launcher.pyw) from its own folder, the
- * repository's root. No console window. Python comes from the PATH: the game's preparation
- * scripts need it anyway. Extra arguments are passed on. */
+/* TLOU Launcher.exe: opens the game launcher (tlou_launcher.pyw) from its own folder. No console
+ * window. Python comes from the PATH: the game's preparation scripts need it anyway. Extra
+ * arguments are passed on. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdlib.h>
@@ -19,16 +19,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     wchar_t *slash = wcsrchr(dir, L'\\');
     if (slash)
         *slash = 0;
-    swprintf(script, 32768, L"%ls\\tools\\tlou_launcher.pyw", dir);
+    swprintf(script, 32768, L"%ls\\tlou_launcher.pyw", dir);
     if (GetFileAttributesW(script) == INVALID_FILE_ATTRIBUTES) {
-        MessageBoxW(NULL, L"tools\\tlou_launcher.pyw n\u00e3o foi encontrado ao lado deste arquivo.", TITLE,
+        MessageBoxW(NULL, L"tlou_launcher.pyw n\u00e3o foi encontrado ao lado deste arquivo.", TITLE,
                     MB_OK | MB_ICONERROR);
         return 1;
     }
     /* Through cmd.exe: a version manager's pythonw on the PATH may be a batch file. */
     if (!GetEnvironmentVariableW(L"ComSpec", shell, MAX_PATH))
         wcscpy(shell, L"C:\\Windows\\System32\\cmd.exe");
-    swprintf(line, 32768, L"\"%ls\" /c pythonw \"tools\\tlou_launcher.pyw\"%ls%ls", shell,
+    swprintf(line, 32768, L"\"%ls\" /c pythonw \"tlou_launcher.pyw\"%ls%ls", shell,
              arguments && *arguments ? L" " : L"", arguments ? arguments : L"");
 
     STARTUPINFOW startup = {.cb = sizeof(startup)};

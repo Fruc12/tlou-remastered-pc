@@ -10,21 +10,22 @@ and a Vulkan renderer (the shadPS4 video core) executes the PS4 GPU work.
 
 ## Status
 
-Work in progress. The game boots through the logos, the menus and the opening cinematic into the
-prologue in Sarah's house, which renders correctly (lighting, skinned characters, bloom).
+Work in progress, playable from the prologue on, with rough edges.
 
-- **Frame rate:** about 47 FPS in Sarah's bedroom and 48-53 FPS walking upstairs on a laptop with
-  a GTX 1050 Ti Mobile (4 GB), where the GPU is the limit; 30-34 FPS in the Quarantine Zone's
-  heavy streets, where the game's own threads are. Frames are shown as soon as they are done (a
-  480 Hz vblank, capped at the display's rate; `GOW3_VBLANK_HZ=60` for the old 60 Hz pacing).
-  `Start-TLOU-Profile.cmd` starts the game with the sampling profiler (reports in
-  `analysis\tlou\profile-user`, read with `tools/profile_rank.py`).
-- **Known issues:** the HUD of the item inspection screen does not show; the characters' hair
-  (Sarah's, Joel's) sometimes stretches, more often when frames are long or uneven. A frame that
-  compiles many new shaders can pause the game for
-  a few seconds: the game's own frame watchdog stopped it after 2 s, and is now patched to 20 s
-  (`TLOU_FIXES=none` leaves the game unpatched). If a load ever hangs, start with
-  `GOW3_FRAMES_IN_FLIGHT=0` (slower).
+- **Frame rate:** on a laptop with a Core i7-8750H and a GTX 1050 Ti Mobile (4 GB), 60 FPS in light
+  areas and about 40-44 FPS in the heaviest area tested, where the CPU side of the renderer is the
+  limit (the draw recording thread at about 87%): lowering the resolution barely helps there.
+- **Frame pacing:** frame times swing while the game runs below its limit, and a fixed 30 FPS limit
+  (launcher, or the in-game menu) makes motion clearly more even.
+- **Known issues:**
+  - NPCs sometimes move in jumps. It comes and goes between runs of the same build; the cause is
+    not settled. The bursts of long frames that seemed to go with it shrank with the faster guest
+    condition variables, and a fixed 30 FPS limit had no jumps in the sessions tried.
+  - The HUD of the item inspection screen does not show.
+  - A frame that compiles many new shaders can pause the game for a moment, mostly the first time
+    an area is played. The game's own frame watchdog is patched from 2 s to 20 s for that
+    (`TLOU_FIXES=none` leaves the game unpatched). If a load ever hangs, start with
+    `GOW3_FRAMES_IN_FLIGHT=0` (slower).
 - **Not available for this game yet:** mouse camera (the mouse drives the right stick instead),
   the draw distance sliders and keyboard button prompts, which need the game's own camera code,
   settings block and prompt textures to be located.
@@ -35,16 +36,21 @@ prologue in Sarah's house, which renders correctly (lighting, skinned characters
 - A CPU from Intel's 4th-generation Core (Haswell) or newer, or any AMD Ryzen: the game needs
   AVX, F16C, BMI1, MOVBE and LZCNT.
 - A graphics card or integrated GPU with Vulkan 1.3 and a current driver.
-- Python 3.10 or newer (the preparation scripts and the start script).
 - About 6 GB of free RAM for the game.
 
 ## Playing
 
+**From a release:** extract the zip, open `TLOU Launcher.exe`, choose the game folder under Folders
+and press Play. Nothing else needs installing. After that, a shortcut with the game's icon appears
+beside the launcher.
+
+**From this repository** (needs Python 3.10 or newer):
+
 1. Put the game folder `CUSA00552` next to this repository's folder, and the update next to it as
    `CUSA00552-patch` (or name another update folder with `TLOU_UPDATE=<folder>`). An update you
    only have as a PKG unpacks there with `python tools/install_update.py <update.pkg> <game folder>`.
-2. Build the runtime (below), then start the game with `Start-TLOU.cmd`, or
-   `python tools/probe_tlou.py --boot --seconds 0 [--game <game folder>]`.
+2. Build the runtime (below), then start the game with `launcher/TLOU Launcher.exe`,
+   `Start-TLOU.cmd`, or `python tools/probe_tlou.py --boot --seconds 0 [--game <game folder>]`.
 3. Saves and settings stay in `analysis/tlou-user`; the log is `analysis/tlou/boot.log`. Each
    session also records your controller input (`analysis/tlou/pad-record-*.txt`, the newest 5),
    so a crash can be replayed on the same route; `TLOU_RECORD_PAD=0` turns that off.
@@ -54,8 +60,9 @@ prologue in Sarah's house, which renders correctly (lighting, skinned characters
    seconds. With the game closed, move the folder, then link it back:
    `mklink /J analysis\tlou-user\cache <folder on the SSD>` (in `cmd`).
 
-The in-game menu (Insert, or R3+L2 on a controller) holds the graphics, controls and frame rate
-settings.
+The launcher sets the display, frame limit and folders, in nine languages; its Debug menu switches
+each optimization off, some of them while the game runs. The in-game menu (Insert, or R3+L2 on a
+controller) holds the graphics, controls and frame rate settings.
 
 **Without a DualShock 4:** the touchpad (backpack, crafting) is Tab / Backspace on the keyboard
 or Back/View on an Xbox-style controller. Shaking the controller is G on the keyboard or the
@@ -79,11 +86,25 @@ gow3_pc/build.sh                 # the runtime: gow3_pc/out/gow3-probe.exe
 
 Clone with `core.autocrlf=false`: line-ending conversion breaks the FSR-Vulkan patches.
 
+`gow3_pc/build.sh` also builds `launcher/TLOU Launcher.exe`. With a profile in
+`gow3_pc/pgo/tlou.profdata` it builds with PGO and LTO (about 10% more FPS in the heaviest area
+tested); the profile is not in the repository, and without it the build is plain. `GOW3_PGO=off`
+gives quicker development builds. A new profile needs a clean build.
+
+`tools/package_windows.sh` builds `dist/TLOU-Remastered-windows.zip`, the release: the runtime and
+its DLLs, the launcher, the scripts and a Python of its own. `tools/package_check.py` refuses game
+files and paths of the build machine.
+
+The launcher reads its background and icon from the player's own copy of the game. A local icon goes
+in `launcher/assets/icon.ico` (not in the repository).
+
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `gow3_pc/` | The runtime: C runtime (`src/`), GPU library (`gpu/`: shadPS4 video core and shims), preparation scripts (`scripts/`). Diagnostics settings: [gow3_pc/README.md](gow3_pc/README.md). |
+| `launcher/` | The launcher (`tlou_launcher.pyw`, Tkinter) and its starter (`tlou-launcher.c`). |
+| `tools/package_windows.sh` | The Windows release zip. |
 | `tools/probe_tlou.py` | Prepares the game's executable (with its update) and starts the runtime with this game's settings. |
 | `tools/tlou_pad.py`, `tools/tlou_bench.py` | Scripted controller input, frame captures and analysis; a repeatable frame rate measurement on a test profile. |
 | `tools/decode_dump.py`, other `tools/` | Image dump decoding and other diagnostics. |
@@ -97,6 +118,12 @@ Clone with `core.autocrlf=false`: line-ending conversion breaks the FSR-Vulkan p
   `GOW3_*` settings, it keeps), and the [shadPS4](https://github.com/shadps4-emu/shadPS4) video core.
 - The camera motion for temporal anti-aliasing (`CameraMotion::OnVelocityConstants` and the motion
   vector mode) comes from SuperMedo's PS4 port ([GitHub](https://github.com/Supermedo), GPL v2).
+- Windows red-zone protection and the reader-preferring memory table lock come from HayatoG's
+  [tlou_pc](https://github.com/HayatoG/tlou_pc) (GPL-2.0-or-later); the protection follows
+  shadPS4's design.
+- The 1 ms timer, the power throttling opt-out, the faster guest condition variables, the idle job
+  worker patch's method and the package's Python copy come from BilalReloaded's
+  [Uncharted: The Nathan Drake Collection port](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port).
 - **NVIDIA DLSS:** DLAA uses NVIDIA DLSS technology through the DLSS bridge adapted from
   [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR)
   (MIT). NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation.
@@ -104,4 +131,4 @@ Clone with `core.autocrlf=false`: line-ending conversion breaks the FSR-Vulkan p
   MIT-licensed FidelityFX SDK source.
 - Third-party code: FSR (AMD), imgui, magic_enum, miniz, xbyak, LibAtrac9, FFmpeg, SDL3, PkgTool
   (LibOrbisPkg, LGPL-3.0).
-- Licensed under the GNU GPL v2 or later (see `gow3_pc/LICENSE`).
+- Licensed under the GNU GPL v2 or later (see `LICENSE`).

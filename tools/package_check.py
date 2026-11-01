@@ -11,7 +11,9 @@ import zipfile
 FORBIDDEN = {".psarc", ".sprx", ".prx", ".elf", ".pkg", ".sfo", ".dds", ".bk2", ".bsf", ".at9", ".ico"}
 FORBIDDEN_NAMES = {"eboot.bin", "tlou.ini", "launcher.json", "boot-linked.bin", "icon0.png", "pic0.png", "pic1.png"}
 FORBIDDEN_FOLDERS = {"analysis", "user", "assets"}
-PRIVATE = [b"raven", b"D:/programacao", b"D:\\programacao"]
+ROOT = Path(__file__).resolve().parent.parent
+# This machine: the user's folder name and where the repository is, in both slash forms.
+PRIVATE = [Path.home().name.encode(), str(ROOT).encode(), ROOT.as_posix().encode()]
 
 
 def main():

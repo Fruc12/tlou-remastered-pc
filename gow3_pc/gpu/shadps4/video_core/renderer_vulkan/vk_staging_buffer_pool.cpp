@@ -77,6 +77,22 @@ StagingBufferPool::StagingBufferPool(const Instance& instance_, Scheduler& sched
             std::memset(block.buffer->mapped_data.data(), 0, block.buffer->mapped_data.size());
         }
     }
+    // gow3 31 Oct 2026: a large device-local staging buffer took 10-330 ms to allocate during
+    // play, once 1.9 s (a frozen frame), when the card's memory was busy. One is made here and
+    // kept. GOW3_STAGING_LARGE_MB=0: none.
+    const char* large = std::getenv("GOW3_STAGING_LARGE_MB");
+    if (const u64 large_mb = large ? std::strtoull(large, nullptr, 10) : 128) {
+        const NewAllocationTimer timer{"large buffer", MemoryType::DeviceLocal, large_mb * 1_MB};
+        large_caches[u32(MemoryType::DeviceLocal)].emplace_back(LargeBuffer{
+            .buffer = std::make_unique<VideoCore::Buffer>(instance, 0, large_mb * 1_MB,
+                                                          MemoryType::DeviceLocal,
+                                                          "StagingBufferPool:Dedicated"),
+            .tick = 0,
+            .last_used_frame = frame,
+            .held = false,
+            .pinned = true,
+        });
+    }
 }
 
 StagingBufferPool::~StagingBufferPool() = default;
@@ -241,7 +257,7 @@ void StagingBufferPool::TrimRing(Ring& ring) {
 
 void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache) {
     std::erase_if(cache, [this](const LargeBuffer& entry) {
-        return !entry.held && frame - entry.last_used_frame >= LARGE_IDLE_FRAMES &&
+        return !entry.pinned && !entry.held && frame - entry.last_used_frame >= LARGE_IDLE_FRAMES &&
                scheduler.IsFree(entry.tick);
     });
 }

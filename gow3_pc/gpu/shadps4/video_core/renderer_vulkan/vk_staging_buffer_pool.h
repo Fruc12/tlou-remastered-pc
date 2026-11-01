@@ -65,6 +65,7 @@ private:
         u64 tick;
         u64 last_used_frame;
         bool held;
+        bool pinned = false; ///< created at startup, never trimmed
     };
 
     static constexpr size_t NUM_TYPES = 3;

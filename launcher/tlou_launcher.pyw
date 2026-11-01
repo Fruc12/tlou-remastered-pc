@@ -18,6 +18,7 @@ from tkinter import filedialog, ttk
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 ICON = HERE / "assets/icon.ico"   # made from the player's own picture, not in the repository
+GAME_ICON = "sce_sys/icon0.png"   # without it, the icon of the player's own dump, read at run time
 USER = ROOT / "analysis/tlou-user"
 INI = USER / "tlou.ini"
 SWITCHES = USER / "launcher.json"
@@ -368,6 +369,46 @@ def load_art(width, height, game=None):
         return None
 
 
+def starter_exe():
+    """TLOU Launcher.exe: at the top of a package, beside this file in the repository."""
+    return next((p for p in (ROOT / "TLOU Launcher.exe", HERE / "TLOU Launcher.exe") if p.is_file()), None)
+
+
+def make_game_ico(game, destination):
+    """The dump's icon as an .ico for the shortcut; False without the picture or Pillow."""
+    picture = Path(game) / GAME_ICON
+    if not picture.is_file():
+        return False
+    try:
+        from PIL import Image
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.open(picture).convert("RGBA").save(destination, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    except (ImportError, OSError, ValueError):
+        return False
+    return True
+
+
+def make_shortcut(link, target, icon):
+    """A Windows shortcut through the shell's own COM object: the paths go by environment."""
+    command = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:TLOU_LINK); $s.TargetPath = $env:TLOU_TARGET; "
+               "$s.WorkingDirectory = $env:TLOU_DIR; $s.IconLocation = $env:TLOU_ICON; $s.Save()")
+    env = dict(os.environ, TLOU_LINK=str(link), TLOU_TARGET=str(target), TLOU_DIR=str(Path(target).parent), TLOU_ICON=str(icon))
+    try:
+        return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command], env=env, timeout=30,
+                              capture_output=True, creationflags=0x08000000).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def game_shortcut(game):
+    """In a package, whose exe has no icon: a shortcut beside it with the icon of the player's game."""
+    exe = starter_exe()
+    if exe is None or ICON.is_file():
+        return False
+    ico = USER / "game-icon.ico"
+    return make_game_ico(game, ico) and make_shortcut(exe.with_name("The Last of Us Remastered.lnk"), exe, ico)
+
+
 def toggle_mask(disabled):
     return sum(set(disabled))
 
@@ -420,8 +461,6 @@ class Launcher(tk.Tk):
         # Its own taskbar entry and icon, not those of pythonw.exe.
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TLOU.Remastered.Launcher")
         super().__init__()
-        if ICON.is_file():
-            self.iconbitmap(default=str(ICON))   # also the windows opened from this one
         self.seconds = seconds
         self.process = None
         self.overrides = read_overrides()
@@ -436,10 +475,27 @@ class Launcher(tk.Tk):
         self.resizable(False, False)
         self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
         self.art = load_art(self.WIDTH, self.HEIGHT, game_folder(self.folders))
+        self.game_icon = None
+        self.set_icon()
         self.style()
         self.ready_message = None
         self.build()
         self.refresh()
+
+    def set_icon(self):
+        """The window's icon, also for the windows opened from this one."""
+        if ICON.is_file():
+            self.iconbitmap(default=str(ICON))
+            return
+        game = game_folder(self.folders)
+        picture = game / GAME_ICON
+        if picture.is_file():
+            try:
+                self.game_icon = tk.PhotoImage(file=str(picture))
+                self.iconphoto(True, self.game_icon)
+            except tk.TclError:
+                pass
+            threading.Thread(target=game_shortcut, args=(game,), daemon=True).start()
 
     def t(self, key):
         return TEXTS[self.language][key]
@@ -744,6 +800,7 @@ class Launcher(tk.Tk):
             self.save()
             if key == "game":
                 self.art = load_art(self.WIDTH, self.HEIGHT, game_folder(self.folders))
+                self.set_icon()
                 self.build()
 
         def browse():

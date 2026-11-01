@@ -21,7 +21,6 @@ Work in progress, playable from the prologue on, with rough edges.
   - NPCs sometimes move in jumps. It comes and goes between runs of the same build; the cause is
     not settled. The bursts of long frames that seemed to go with it shrank with the faster guest
     condition variables, and a fixed 30 FPS limit had no jumps in the sessions tried.
-  - The HUD of the item inspection screen does not show.
   - A frame that compiles many new shaders can pause the game for a moment, mostly the first time
     an area is played. The game's own frame watchdog is patched from 2 s to 20 s for that
     (`TLOU_FIXES=none` leaves the game unpatched). If a load ever hangs, start with

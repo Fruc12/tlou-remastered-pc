@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 
 ROOT = Path(__file__).resolve().parent.parent
 USER = ROOT / "analysis/tlou-user"
@@ -28,7 +28,7 @@ UPSCALERS = {"off": "off", "FSR 3": "fsr3", "TAA": "taa", "DLSS": "dlss"}
 PRESETS = {"q_native": "0", "q_quality": "1", "q_balanced": "2", "q_performance": "3", "q_ultra": "4"}
 RESOLUTIONS = ["1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"]
 DEFAULT_SWITCHES = {"motion_blur": False, "job_sleep": True, "profile": False}
-DEFAULT_LANGUAGE = "pt"
+DEFAULT_LANGUAGE = "en"
 # What Start-TLOU-Profile.cmd sets, for the "profiler" switch.
 PROFILE_ENV = {"GOW3_PROFILE": "10", "GOW3_THREAD_IDS": "1", "GOW3_COMPUTE_WAIT_STATS": "1",
                "GOW3_FAULT_STATS": "1", "GOW3_FAULT_TIMES": "1", "GOW3_PROFILE_GUEST": "NdJobWorkerThread",
@@ -99,13 +99,16 @@ STARTUP = [
 ]
 
 # The art is the player's own dump's (sce_sys), read at run time: no game file in the repository.
-ART = [GAME / "sce_sys/pic1.png", GAME / "sce_sys/pic0.png"]
+ART = ["sce_sys/pic1.png", "sce_sys/pic0.png"]
+# Folders the player can change; empty is the default. {key: (text key, default)}.
+FOLDERS = {"game": ("game_folder", GAME), "saves": ("saves_folder", USER), "cache": ("cache_folder", USER / "cache")}
 UI_LANGUAGES = {"pt": "Português", "en": "English", "es": "Español", "fr": "Français", "de": "Deutsch",
                 "it": "Italiano", "pl": "Polski", "ru": "Русский", "ja": "日本語"}
 KEYS = ("subtitle video game language ui_language display resolution fps upscaler quality vsync show_fps "
         "motion_blur job_sleep profile play running starting ready debug log no_game no_exe borderless fullscreen "
         "windowed off q_native q_quality q_balanced q_performance q_ultra warn tab_live tab_startup note_live "
-        "note_startup reset").split()
+        "note_startup reset folders game_folder saves_folder cache_folder browse default_folder folders_note "
+        "no_eboot").split()
 TEXT_TABLE = {
     "pt": ["Port para PC", "Vídeo", "Jogo", "Idioma", "Idioma do launcher", "Modo de tela", "Resolução",
            "Limite de FPS", "Upscaler", "Qualidade do upscaler", "VSync", "Mostrar FPS no jogo", "Motion blur",
@@ -115,7 +118,15 @@ TEXT_TABLE = {
            "Qualidade", "Equilibrado", "Desempenho", "Ultra desempenho",
            "Para diagnóstico. Algumas opções podem travar o jogo ou causar bugs gráficos.", "Ao vivo", "Ao iniciar",
            "Valem na hora, com o jogo aberto, e duram só esta execução.", "Valem a partir da próxima vez que o jogo abrir.",
-           "Restaurar padrão"],
+           "Restaurar padrão",
+           "Pastas",
+           "Arquivos do jogo",
+           "Saves",
+           "Cache de shaders",
+           "Procurar",
+           "Padrão",
+           "A atualização é procurada ao lado da pasta do jogo, com '-patch' no nome. Mudar a pasta de saves ou de cache não move os arquivos: o jogo começa sem saves, ou recompila os shaders.",
+           "Esta pasta não tem eboot.bin"],
     "en": ["PC port", "Video", "Game", "Language", "Launcher language", "Display mode", "Resolution",
            "FPS limit", "Upscaler", "Upscaler quality", "VSync", "Show FPS in game", "Motion blur",
            "Reduce idle CPU use", "Record a performance profile (about 10% fewer FPS)", "PLAY", "RUNNING", "STARTING...",
@@ -123,7 +134,15 @@ TEXT_TABLE = {
            "Fullscreen", "Windowed", "Off", "Native", "Quality", "Balanced", "Performance", "Ultra performance",
            "For diagnostics. Some options may hang the game or cause graphics bugs.", "Live", "At start",
            "Apply at once, with the game open, for this run only.", "Apply the next time the game opens.",
-           "Restore defaults"],
+           "Restore defaults",
+           "Folders",
+           "Game files",
+           "Saves",
+           "Shader cache",
+           "Browse",
+           "Default",
+           "The update is looked for beside the game folder, with '-patch' in its name. Changing the saves or cache folder does not move the files: the game starts with no saves, or compiles its shaders again.",
+           "This folder has no eboot.bin"],
     "es": ["Port para PC", "Vídeo", "Juego", "Idioma", "Idioma del launcher", "Modo de pantalla",
            "Resolución", "Límite de FPS", "Upscaler", "Calidad del upscaler", "VSync", "Mostrar FPS en el juego",
            "Desenfoque de movimiento", "Reducir el uso de CPU inactiva",
@@ -132,7 +151,15 @@ TEXT_TABLE = {
            "Pantalla completa", "Ventana", "Desactivado", "Nativo", "Calidad", "Equilibrado", "Rendimiento",
            "Ultra rendimiento", "Para diagnóstico. Algunas opciones pueden bloquear el juego o causar errores gráficos.",
            "En vivo", "Al iniciar", "Se aplican al momento, con el juego abierto, solo en esta ejecución.",
-           "Se aplican la próxima vez que se abra el juego.", "Restaurar valores"],
+           "Se aplican la próxima vez que se abra el juego.", "Restaurar valores",
+           "Carpetas",
+           "Archivos del juego",
+           "Partidas guardadas",
+           "Caché de shaders",
+           "Examinar",
+           "Predeterminada",
+           "La actualización se busca junto a la carpeta del juego, con '-patch' en el nombre. Cambiar la carpeta de partidas o de caché no mueve los archivos: el juego empieza sin partidas o vuelve a compilar los shaders.",
+           "Esta carpeta no tiene eboot.bin"],
     "fr": ["Portage PC", "Vidéo", "Jeu", "Langue", "Langue du launcher", "Mode d'affichage", "Résolution",
            "Limite d'IPS", "Upscaler", "Qualité de l'upscaler", "VSync", "Afficher les IPS en jeu", "Flou de mouvement",
            "Réduire l'usage du CPU au repos", "Enregistrer un profil de performance (environ 10 % d'IPS en moins)", "JOUER",
@@ -141,7 +168,15 @@ TEXT_TABLE = {
            "Qualité", "Équilibré", "Performance", "Ultra performance",
            "Pour le diagnostic. Certaines options peuvent bloquer le jeu ou causer des bugs graphiques.", "En direct",
            "Au démarrage", "S'appliquent tout de suite, jeu ouvert, pour cette session seulement.",
-           "S'appliquent à la prochaine ouverture du jeu.", "Rétablir les valeurs"],
+           "S'appliquent à la prochaine ouverture du jeu.", "Rétablir les valeurs",
+           "Dossiers",
+           "Fichiers du jeu",
+           "Sauvegardes",
+           "Cache des shaders",
+           "Parcourir",
+           "Par défaut",
+           "La mise à jour est cherchée à côté du dossier du jeu, avec '-patch' dans son nom. Changer le dossier des sauvegardes ou du cache ne déplace pas les fichiers : le jeu démarre sans sauvegardes ou recompile ses shaders.",
+           "Ce dossier ne contient pas eboot.bin"],
     "de": ["PC-Port", "Video", "Spiel", "Sprache", "Launcher-Sprache", "Anzeigemodus", "Auflösung", "FPS-Limit",
            "Upscaler", "Upscaler-Qualität", "VSync", "FPS im Spiel anzeigen", "Bewegungsunschärfe",
            "CPU-Last im Leerlauf senken", "Leistungsprofil aufzeichnen (etwa 10 % weniger FPS)", "SPIELEN", "LÄUFT",
@@ -150,7 +185,15 @@ TEXT_TABLE = {
            "Qualität", "Ausgewogen", "Leistung", "Ultra-Leistung",
            "Zur Diagnose. Manche Optionen können das Spiel einfrieren oder Grafikfehler verursachen.", "Live", "Beim Start",
            "Gelten sofort bei laufendem Spiel, nur für diesen Start.", "Gelten beim nächsten Spielstart.",
-           "Standard wiederherstellen"],
+           "Standard wiederherstellen",
+           "Ordner",
+           "Spieldateien",
+           "Spielstände",
+           "Shader-Cache",
+           "Durchsuchen",
+           "Standard",
+           "Das Update wird neben dem Spielordner gesucht, mit '-patch' im Namen. Ein anderer Ordner für Spielstände oder Cache verschiebt die Dateien nicht: Das Spiel startet ohne Spielstände oder kompiliert die Shader neu.",
+           "Dieser Ordner enthält keine eboot.bin"],
     "it": ["Port per PC", "Video", "Gioco", "Lingua", "Lingua del launcher", "Modalità schermo",
            "Risoluzione", "Limite FPS", "Upscaler", "Qualità dell'upscaler", "VSync", "Mostra FPS in gioco",
            "Sfocatura di movimento", "Riduci l'uso della CPU inattiva",
@@ -159,7 +202,15 @@ TEXT_TABLE = {
            "Schermo intero", "Finestra", "Disattivato", "Nativo", "Qualità", "Bilanciato", "Prestazioni", "Ultra prestazioni",
            "Per la diagnostica. Alcune opzioni possono bloccare il gioco o causare errori grafici.", "Dal vivo", "All'avvio",
            "Valgono subito, a gioco aperto, solo per questa esecuzione.", "Valgono al prossimo avvio del gioco.",
-           "Ripristina predefiniti"],
+           "Ripristina predefiniti",
+           "Cartelle",
+           "File del gioco",
+           "Salvataggi",
+           "Cache degli shader",
+           "Sfoglia",
+           "Predefinita",
+           "L'aggiornamento viene cercato accanto alla cartella del gioco, con '-patch' nel nome. Cambiare la cartella dei salvataggi o della cache non sposta i file: il gioco parte senza salvataggi o ricompila gli shader.",
+           "Questa cartella non contiene eboot.bin"],
     "pl": ["Port na PC", "Obraz", "Gra", "Język", "Język launchera", "Tryb ekranu", "Rozdzielczość", "Limit FPS",
            "Upscaler", "Jakość upscalera", "VSync", "Pokazuj FPS w grze", "Rozmycie ruchu", "Mniejsze użycie CPU w bezczynności",
            "Nagrywaj profil wydajności (około 10% mniej FPS)", "GRAJ", "URUCHOMIONO", "URUCHAMIANIE...", "Gotowe", "Debug",
@@ -167,7 +218,15 @@ TEXT_TABLE = {
            "Bez ramek", "Pełny ekran", "Okno", "Wyłączone", "Natywna", "Jakość", "Zrównoważona", "Wydajność", "Ultra wydajność",
            "Do diagnostyki. Niektóre opcje mogą zawiesić grę lub powodować błędy grafiki.", "Na żywo", "Przy starcie",
            "Działają od razu, przy otwartej grze, tylko w tym uruchomieniu.", "Działają od następnego uruchomienia gry.",
-           "Przywróć domyślne"],
+           "Przywróć domyślne",
+           "Foldery",
+           "Pliki gry",
+           "Zapisy",
+           "Pamięć podręczna shaderów",
+           "Przeglądaj",
+           "Domyślny",
+           "Aktualizacja jest szukana obok folderu gry, z '-patch' w nazwie. Zmiana folderu zapisów lub pamięci podręcznej nie przenosi plików: gra zacznie bez zapisów albo ponownie skompiluje shadery.",
+           "Ten folder nie zawiera eboot.bin"],
     "ru": ["Порт для ПК", "Видео", "Игра", "Язык", "Язык лаунчера", "Режим экрана", "Разрешение", "Лимит FPS",
            "Апскейлер", "Качество апскейлера", "VSync", "Показывать FPS в игре", "Размытие в движении",
            "Снизить нагрузку на ЦП в простое", "Записывать профиль производительности (примерно на 10% меньше FPS)", "ИГРАТЬ",
@@ -176,14 +235,30 @@ TEXT_TABLE = {
            "Родное", "Качество", "Баланс", "Производительность", "Ультрапроизводительность",
            "Для диагностики. Некоторые параметры могут привести к зависанию или графическим ошибкам.", "На лету", "При запуске",
            "Применяются сразу, при открытой игре, только на этот запуск.", "Применяются при следующем запуске игры.",
-           "Восстановить значения"],
+           "Восстановить значения",
+           "Папки",
+           "Файлы игры",
+           "Сохранения",
+           "Кэш шейдеров",
+           "Обзор",
+           "По умолчанию",
+           "Обновление ищется рядом с папкой игры, с '-patch' в имени. Смена папки сохранений или кэша не переносит файлы: игра начнётся без сохранений или заново скомпилирует шейдеры.",
+           "В этой папке нет eboot.bin"],
     "ja": ["PC移植版", "映像", "ゲーム", "言語", "ランチャーの言語", "表示モード", "解像度", "FPS上限", "アップスケーラー",
            "アップスケーラーの品質", "VSync", "ゲーム内にFPSを表示", "モーションブラー", "待機時のCPU使用を減らす",
            "パフォーマンスプロファイルを記録(FPSが約10%低下)", "プレイ", "実行中", "起動中...", "準備完了", "デバッグ", "ログを開く",
            "ゲームが見つかりません: {}", "実行ファイルが見つかりません: gow3_pc/build.sh を実行してください", "ボーダーレス", "フルスクリーン",
            "ウィンドウ", "オフ", "ネイティブ", "品質", "バランス", "パフォーマンス", "ウルトラパフォーマンス",
            "診断用です。一部のオプションはゲームの停止や表示の不具合を起こす場合があります。", "ライブ", "起動時",
-           "ゲーム実行中にすぐ反映され、今回の実行のみ有効です。", "次回ゲームを開いたときに反映されます。", "初期設定に戻す"],
+           "ゲーム実行中にすぐ反映され、今回の実行のみ有効です。", "次回ゲームを開いたときに反映されます。", "初期設定に戻す",
+           "フォルダー",
+           "ゲームファイル",
+           "セーブデータ",
+           "シェーダーキャッシュ",
+           "参照",
+           "既定",
+           "アップデートはゲームフォルダーの隣にある名前に「-patch」が付いたフォルダーから探します。セーブやキャッシュのフォルダーを変更してもファイルは移動しません。セーブなしで始まるか、シェーダーが再コンパイルされます。",
+           "このフォルダーには eboot.bin がありません"],
 }
 TEXTS = {code: dict(zip(KEYS, values)) for code, values in TEXT_TABLE.items()}
 
@@ -248,9 +323,33 @@ def read_ui_language(path=None):
     return saved if saved in TEXTS else DEFAULT_LANGUAGE
 
 
-def load_art(width, height):
+def read_folders(path=None):
+    """{key: folder} chosen in the launcher; a missing or empty one is the default."""
+    try:
+        saved = json.loads((path or SWITCHES).read_text(encoding="utf-8")).get("folders", {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {k: v for k, v in saved.items() if k in FOLDERS and isinstance(v, str) and v} if isinstance(saved, dict) else {}
+
+
+def game_folder(folders):
+    return Path(folders.get("game") or GAME)
+
+
+def game_command(python, folders, seconds=0):
+    """The probe's command line; a default folder is not passed (--saves also changes what it records)."""
+    command = [python, "tools/probe_tlou.py", "--boot", "--seconds", str(seconds)]
+    if folders.get("game"):
+        command += ["--game", folders["game"]]
+    if folders.get("saves"):
+        command += ["--saves", folders["saves"]]
+    return command
+
+
+def load_art(width, height, game=None):
     """The dump's key art, covering width x height and kept to its right edge; None without it."""
-    path = next((p for p in ART if p.is_file()), None)
+    folder = Path(game or GAME)
+    path = next((folder / p for p in ART if (folder / p).is_file()), None)
     if path is None:
         return None
     try:
@@ -278,10 +377,12 @@ def write_toggles(mask, path=None):
     os.replace(temporary, path)
 
 
-def game_env(switches, base=None, overrides=None):
+def game_env(switches, base=None, overrides=None, folders=None):
     """The environment of a run with these switches."""
     env = dict(os.environ if base is None else base)
     env.update(overrides or {})
+    if folders and folders.get("cache"):
+        env["GOW3_GPU_CACHE_DIR"] = folders["cache"]
     env["GOW3_NO_MOTION_BLUR"] = "0" if switches["motion_blur"] else "1"
     env["TLOU_JOB_SLEEP"] = "1" if switches["job_sleep"] else "0"
     if switches["profile"]:
@@ -320,12 +421,14 @@ class Launcher(tk.Tk):
         self.disabled = set()   # live toggles switched off in the debug menu
         self.was_running = False
         self.debug_window = None
+        self.folders_window = None
         self.language = read_ui_language()
+        self.folders = read_folders()
         self.title("The Last of Us Remastered")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
-        self.art = load_art(self.WIDTH, self.HEIGHT)
+        self.art = load_art(self.WIDTH, self.HEIGHT, game_folder(self.folders))
         self.style()
         self.ready_message = None
         self.build()
@@ -341,7 +444,7 @@ class Launcher(tk.Tk):
     def build(self):
         """The whole window: called again when the launcher's language changes."""
         for child in self.winfo_children():
-            if child is not self.debug_window:
+            if child not in (self.debug_window, self.folders_window):
                 child.destroy()
         ini, switches = read_ini(), read_switches()
         canvas = self.canvas = tk.Canvas(self, width=self.WIDTH, height=self.HEIGHT, bg=BG, highlightthickness=0)
@@ -389,6 +492,7 @@ class Launcher(tk.Tk):
         self.status = canvas.create_text(self.WIDTH - 300, self.HEIGHT - 26, anchor="w", fill=MUTED, font=("Segoe UI", 9))
         self.link(canvas, self.WIDTH - 44, self.t("debug"), self.open_debug)
         self.link(canvas, self.WIDTH - 104, self.t("log"), self.open_log)
+        self.link(canvas, self.WIDTH - 180, self.t("folders"), self.open_folders)
         self.ready_message = self.check_install()
 
     def style(self):
@@ -441,11 +545,15 @@ class Launcher(tk.Tk):
         window = self.debug_window
         if window is not None and window.winfo_exists():
             window.destroy()
+        window = self.folders_window
+        if window is not None and window.winfo_exists():
+            window.destroy()
         self.build()
 
     def check_install(self):
-        if not (GAME / "eboot.bin").is_file():
-            return self.t("no_game").format(GAME)
+        game = game_folder(self.folders)
+        if not (game / "eboot.bin").is_file():
+            return self.t("no_game").format(game)
         if not (ROOT / "gow3_pc/out/gow3-probe.exe").is_file():
             return self.t("no_exe")
         return ""
@@ -458,7 +566,8 @@ class Launcher(tk.Tk):
                    "fps_limit": self.fps.get(), "upscaler": self.upscaler_labels[self.upscaler.get()],
                    "preset": self.preset_labels[self.preset.get()], "vsync": int(self.vsync.get()),
                    "show_fps": int(self.show_fps.get())})
-        SWITCHES.write_text(json.dumps({**self.switches(), "ui_language": self.language, "overrides": self.overrides},
+        SWITCHES.write_text(json.dumps({**self.switches(), "ui_language": self.language, "folders": self.folders,
+                                        "overrides": self.overrides},
                                        indent=2) + "\n", encoding="utf-8")
 
     def refresh(self):
@@ -487,13 +596,13 @@ class Launcher(tk.Tk):
     def play(self):
         self.save()
         self.play_button.config(state="disabled", text=self.t("starting"), bg=DISABLED)
-        env = game_env(self.switches(), overrides=self.overrides)
+        env = game_env(self.switches(), overrides=self.overrides, folders=self.folders)
         if self.profile.get():
             Path(PROFILE_ENV["GOW3_DUMP_DIR"]).mkdir(parents=True, exist_ok=True)
         RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
         with RUN_LOG.open("w", encoding="utf-8") as output:
             self.process = subprocess.Popen(
-                [python_exe(), "tools/probe_tlou.py", "--boot", "--seconds", str(self.seconds)], cwd=ROOT, env=env,
+                game_command(python_exe(), self.folders, self.seconds), cwd=ROOT, env=env,
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, creationflags=0x08000000)
 
     def open_debug(self):
@@ -589,6 +698,56 @@ class Launcher(tk.Tk):
                     variables[name].set(default)
 
         self.reset_link(outer, reset)
+
+    def open_folders(self):
+        if self.folders_window is not None and self.folders_window.winfo_exists():
+            self.folders_window.lift()
+            return
+        self.folders_window = window = tk.Toplevel(self, bg=BG)
+        window.title(self.t("folders"))
+        window.resizable(False, False)
+        window.geometry(f"+{self.winfo_rootx() + 60}+{self.winfo_rooty() + 90}")
+        window.columnconfigure(0, weight=1)
+        for row, (key, (text, default)) in enumerate(FOLDERS.items()):
+            self.folder_row(window, row, key, text, default)
+        tk.Label(window, text=self.t("folders_note"), bg=BG, fg=MUTED, font=("Segoe UI", 9), justify="left",
+                 wraplength=640).grid(row=len(FOLDERS), column=0, columnspan=3, sticky="w", padx=16, pady=(4, 14))
+
+    def folder_row(self, window, row, key, text, default):
+        area = tk.Frame(window, bg=BG)
+        area.grid(row=row, column=0, sticky="ew", padx=16, pady=(12, 4))
+        area.columnconfigure(0, weight=1)
+        tk.Label(area, text=text and self.t(text), bg=BG, fg=ACCENT, font=("Segoe UI Semibold", 9)).grid(row=0, column=0, sticky="w")
+        shown = tk.StringVar(value=self.folders.get(key) or str(default))
+        tk.Entry(area, textvariable=shown, state="readonly", readonlybackground=PANEL, fg=TEXT, bd=0, width=70,
+                 font=("Segoe UI", 10)).grid(row=1, column=0, sticky="ew", ipady=4)
+        error = tk.Label(area, bg=BG, fg=ERROR, font=("Segoe UI", 9))
+        error.grid(row=2, column=0, sticky="w")
+
+        def change(value):
+            if key == "game" and value and not (Path(value) / "eboot.bin").is_file():
+                error.config(text=self.t("no_eboot"))
+                return
+            error.config(text="")
+            if value:
+                self.folders[key] = value
+            else:
+                self.folders.pop(key, None)
+            shown.set(value or str(default))
+            self.save()
+            if key == "game":
+                self.art = load_art(self.WIDTH, self.HEIGHT, game_folder(self.folders))
+                self.build()
+
+        def browse():
+            chosen = filedialog.askdirectory(parent=window, initialdir=shown.get())
+            if chosen:
+                change(str(Path(chosen)))
+
+        for column, (label, command) in enumerate(((self.t("browse"), browse), (self.t("default_folder"), lambda: change("")))):
+            tk.Button(area, text=label, command=command, bg=PANEL, fg=TEXT, bd=0, cursor="hand2", activebackground="#222",
+                      activeforeground=ACCENT, font=("Segoe UI", 9), padx=10).grid(row=1, column=column + 1, padx=(6, 0), ipady=2)
+        area.change = change    # (tests)
 
     def open_log(self):
         if LOG.is_file():

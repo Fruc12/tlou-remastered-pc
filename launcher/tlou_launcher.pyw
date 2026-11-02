@@ -31,7 +31,7 @@ DISPLAY = {"borderless": "borderless", "fullscreen": "fullscreen", "windowed": "
 UPSCALERS = {"off": "off", "FSR 3": "fsr3", "TAA": "taa", "DLSS": "dlss"}
 PRESETS = {"q_native": "0", "q_quality": "1", "q_balanced": "2", "q_performance": "3", "q_ultra": "4"}
 RESOLUTIONS = ["1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"]
-DEFAULT_SWITCHES = {"motion_blur": False, "job_sleep": True, "profile": False, "async_shaders": False}
+DEFAULT_SWITCHES = {"motion_blur": False, "job_sleep": True, "profile": False, "background_shaders": True}
 DEFAULT_LANGUAGE = "en"
 # What Start-TLOU-Profile.cmd sets, for the "profiler" switch.
 PROFILE_ENV = {"GOW3_PROFILE": "10", "GOW3_THREAD_IDS": "1", "GOW3_COMPUTE_WAIT_STATS": "1",
@@ -112,7 +112,7 @@ KEYS = ("subtitle video game language ui_language display resolution fps upscale
         "motion_blur job_sleep profile play running starting ready debug log no_game no_exe borderless fullscreen "
         "windowed off q_native q_quality q_balanced q_performance q_ultra warn tab_live tab_startup note_live "
         "note_startup reset folders game_folder saves_folder cache_folder browse default_folder folders_note "
-        "no_eboot async_shaders").split()
+        "no_eboot background_shaders").split()
 TEXT_TABLE = {
     "pt": ["Port para PC", "Vídeo", "Jogo", "Idioma", "Idioma do launcher", "Modo de tela", "Resolução",
            "Limite de FPS", "Upscaler", "Qualidade do upscaler", "VSync", "Mostrar FPS no jogo", "Motion blur",
@@ -131,7 +131,7 @@ TEXT_TABLE = {
            "Padrão",
            "A atualização é procurada ao lado da pasta do jogo, com '-patch' no nome. Mudar a pasta de saves ou de cache não move os arquivos: o jogo começa sem saves, ou recompila os shaders.",
            "Esta pasta não tem eboot.bin",
-           "Compilar shaders em segundo plano (experimental)"],
+           "Compilar shaders em segundo plano"],
     "en": ["PC port", "Video", "Game", "Language", "Launcher language", "Display mode", "Resolution",
            "FPS limit", "Upscaler", "Upscaler quality", "VSync", "Show FPS in game", "Motion blur",
            "Reduce idle CPU use", "Record a performance profile (about 10% fewer FPS)", "PLAY", "RUNNING", "STARTING...",
@@ -148,7 +148,7 @@ TEXT_TABLE = {
            "Default",
            "The update is looked for beside the game folder, with '-patch' in its name. Changing the saves or cache folder does not move the files: the game starts with no saves, or compiles its shaders again.",
            "This folder has no eboot.bin",
-           "Compile shaders in the background (experimental)"],
+           "Compile shaders in the background"],
     "es": ["Port para PC", "Vídeo", "Juego", "Idioma", "Idioma del launcher", "Modo de pantalla",
            "Resolución", "Límite de FPS", "Upscaler", "Calidad del upscaler", "VSync", "Mostrar FPS en el juego",
            "Desenfoque de movimiento", "Reducir el uso de CPU inactiva",
@@ -166,7 +166,7 @@ TEXT_TABLE = {
            "Predeterminada",
            "La actualización se busca junto a la carpeta del juego, con '-patch' en el nombre. Cambiar la carpeta de partidas o de caché no mueve los archivos: el juego empieza sin partidas o vuelve a compilar los shaders.",
            "Esta carpeta no tiene eboot.bin",
-           "Compilar shaders en segundo plano (experimental)"],
+           "Compilar shaders en segundo plano"],
     "fr": ["Portage PC", "Vidéo", "Jeu", "Langue", "Langue du launcher", "Mode d'affichage", "Résolution",
            "Limite d'IPS", "Upscaler", "Qualité de l'upscaler", "VSync", "Afficher les IPS en jeu", "Flou de mouvement",
            "Réduire l'usage du CPU au repos", "Enregistrer un profil de performance (environ 10 % d'IPS en moins)", "JOUER",
@@ -184,7 +184,7 @@ TEXT_TABLE = {
            "Par défaut",
            "La mise à jour est cherchée à côté du dossier du jeu, avec '-patch' dans son nom. Changer le dossier des sauvegardes ou du cache ne déplace pas les fichiers : le jeu démarre sans sauvegardes ou recompile ses shaders.",
            "Ce dossier ne contient pas eboot.bin",
-           "Compiler les shaders en arrière-plan (expérimental)"],
+           "Compiler les shaders en arrière-plan"],
     "de": ["PC-Port", "Video", "Spiel", "Sprache", "Launcher-Sprache", "Anzeigemodus", "Auflösung", "FPS-Limit",
            "Upscaler", "Upscaler-Qualität", "VSync", "FPS im Spiel anzeigen", "Bewegungsunschärfe",
            "CPU-Last im Leerlauf senken", "Leistungsprofil aufzeichnen (etwa 10 % weniger FPS)", "SPIELEN", "LÄUFT",
@@ -202,7 +202,7 @@ TEXT_TABLE = {
            "Standard",
            "Das Update wird neben dem Spielordner gesucht, mit '-patch' im Namen. Ein anderer Ordner für Spielstände oder Cache verschiebt die Dateien nicht: Das Spiel startet ohne Spielstände oder kompiliert die Shader neu.",
            "Dieser Ordner enthält keine eboot.bin",
-           "Shader im Hintergrund kompilieren (experimentell)"],
+           "Shader im Hintergrund kompilieren"],
     "it": ["Port per PC", "Video", "Gioco", "Lingua", "Lingua del launcher", "Modalità schermo",
            "Risoluzione", "Limite FPS", "Upscaler", "Qualità dell'upscaler", "VSync", "Mostra FPS in gioco",
            "Sfocatura di movimento", "Riduci l'uso della CPU inattiva",
@@ -220,7 +220,7 @@ TEXT_TABLE = {
            "Predefinita",
            "L'aggiornamento viene cercato accanto alla cartella del gioco, con '-patch' nel nome. Cambiare la cartella dei salvataggi o della cache non sposta i file: il gioco parte senza salvataggi o ricompila gli shader.",
            "Questa cartella non contiene eboot.bin",
-           "Compila gli shader in background (sperimentale)"],
+           "Compila gli shader in background"],
     "pl": ["Port na PC", "Obraz", "Gra", "Język", "Język launchera", "Tryb ekranu", "Rozdzielczość", "Limit FPS",
            "Upscaler", "Jakość upscalera", "VSync", "Pokazuj FPS w grze", "Rozmycie ruchu", "Mniejsze użycie CPU w bezczynności",
            "Nagrywaj profil wydajności (około 10% mniej FPS)", "GRAJ", "URUCHOMIONO", "URUCHAMIANIE...", "Gotowe", "Debug",
@@ -237,7 +237,7 @@ TEXT_TABLE = {
            "Domyślny",
            "Aktualizacja jest szukana obok folderu gry, z '-patch' w nazwie. Zmiana folderu zapisów lub pamięci podręcznej nie przenosi plików: gra zacznie bez zapisów albo ponownie skompiluje shadery.",
            "Ten folder nie zawiera eboot.bin",
-           "Kompiluj shadery w tle (eksperymentalne)"],
+           "Kompiluj shadery w tle"],
     "ru": ["Порт для ПК", "Видео", "Игра", "Язык", "Язык лаунчера", "Режим экрана", "Разрешение", "Лимит FPS",
            "Апскейлер", "Качество апскейлера", "VSync", "Показывать FPS в игре", "Размытие в движении",
            "Снизить нагрузку на ЦП в простое", "Записывать профиль производительности (примерно на 10% меньше FPS)", "ИГРАТЬ",
@@ -255,7 +255,7 @@ TEXT_TABLE = {
            "По умолчанию",
            "Обновление ищется рядом с папкой игры, с '-patch' в имени. Смена папки сохранений или кэша не переносит файлы: игра начнётся без сохранений или заново скомпилирует шейдеры.",
            "В этой папке нет eboot.bin",
-           "Компилировать шейдеры в фоне (экспериментально)"],
+           "Компилировать шейдеры в фоне"],
     "ja": ["PC移植版", "映像", "ゲーム", "言語", "ランチャーの言語", "表示モード", "解像度", "FPS上限", "アップスケーラー",
            "アップスケーラーの品質", "VSync", "ゲーム内にFPSを表示", "モーションブラー", "待機時のCPU使用を減らす",
            "パフォーマンスプロファイルを記録(FPSが約10%低下)", "プレイ", "実行中", "起動中...", "準備完了", "デバッグ", "ログを開く",
@@ -271,7 +271,7 @@ TEXT_TABLE = {
            "既定",
            "アップデートはゲームフォルダーの隣にある名前に「-patch」が付いたフォルダーから探します。セーブやキャッシュのフォルダーを変更してもファイルは移動しません。セーブなしで始まるか、シェーダーが再コンパイルされます。",
            "このフォルダーには eboot.bin がありません",
-           "シェーダーをバックグラウンドでコンパイル(実験的)"],
+           "シェーダーをバックグラウンドでコンパイル"],
 }
 TEXTS = {code: dict(zip(KEYS, values)) for code, values in TEXT_TABLE.items()}
 
@@ -438,9 +438,9 @@ def game_env(switches, base=None, overrides=None, folders=None):
         env["GOW3_GPU_CACHE_DIR"] = folders["cache"]
     env["GOW3_NO_MOTION_BLUR"] = "0" if switches["motion_blur"] else "1"
     env["TLOU_JOB_SLEEP"] = "1" if switches["job_sleep"] else "0"
-    if switches["async_shaders"]:
-        # Draws are skipped while their pipeline compiles: it pauses less, but it flashed white
-        # and crashed the game on 22 Oct 2026, so it stays an opt-in.
+    if switches["background_shaders"]:
+        # Draws are skipped while their pipeline compiles: it pauses less. It flashed white and
+        # crashed the game on 22 Oct 2026 and this switch turns it off if that comes back.
         env["GOW3_ASYNC_SHADERS"] = "1"
         env["GOW3_ASYNC_SHADERS_LOCKED"] = "0"
     if switches["profile"]:
@@ -561,7 +561,7 @@ class Launcher(tk.Tk):
         self.motion_blur = self.check(panel, row, self.t("motion_blur"), switches["motion_blur"])
         self.job_sleep = self.check(panel, row + 1, self.t("job_sleep"), switches["job_sleep"])
         self.profile = self.check(panel, row + 2, self.t("profile"), switches["profile"])
-        self.async_shaders = self.check(panel, row + 3, self.t("async_shaders"), switches["async_shaders"])
+        self.background_shaders = self.check(panel, row + 3, self.t("background_shaders"), switches["background_shaders"])
 
         self.play_button = tk.Button(self, text=self.t("play"), command=self.play, bg=ACCENT, fg=BG,
                                      activebackground=ACCENT_HOT, activeforeground=BG, bd=0, relief="flat",
@@ -638,7 +638,7 @@ class Launcher(tk.Tk):
 
     def switches(self):
         return {"motion_blur": self.motion_blur.get(), "job_sleep": self.job_sleep.get(), "profile": self.profile.get(),
-                "async_shaders": self.async_shaders.get()}
+                "background_shaders": self.background_shaders.get()}
 
     def save(self):
         write_ini({"display_mode": self.display_labels[self.display.get()], "output_res": self.resolution.get(),

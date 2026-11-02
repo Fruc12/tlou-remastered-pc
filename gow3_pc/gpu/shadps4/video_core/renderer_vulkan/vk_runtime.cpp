@@ -763,6 +763,46 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
 }
 
+void Runtime::CopyStencil(VideoCore::Image* src, VideoCore::Image* dst) {
+    scheduler.EndRendering();
+
+    bool needs_flush =
+        Transit(src, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eCopy,
+                vk::AccessFlagBits2::eTransferRead);
+    needs_flush |= Transit(dst, vk::ImageLayout::eTransferDstOptimal,
+                           vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
+    if (needs_flush) {
+        FlushBarriers();
+    }
+
+    const vk::ImageCopy region = {
+        .srcSubresource{
+            .aspectMask = vk::ImageAspectFlagBits::eStencil,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .srcOffset = {0, 0, 0},
+        .dstSubresource{
+            .aspectMask = vk::ImageAspectFlagBits::eStencil,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .dstOffset = {0, 0, 0},
+        .extent = {std::min(src->info.size.width, dst->info.size.width),
+                   std::min(src->info.size.height, dst->info.size.height), 1},
+    };
+
+    scheduler.Record([src_image = src->GetImage(), dst_image = dst->GetImage(),
+                      region](vk::CommandBuffer cmdbuf) {
+        cmdbuf.copyImage(src_image, vk::ImageLayout::eTransferSrcOptimal, dst_image,
+                         vk::ImageLayout::eTransferDstOptimal, region);
+    });
+
+    dst->flags |= VideoCore::ImageFlagBits::GpuModified;
+}
+
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {

@@ -88,6 +88,8 @@ public:
 
     void CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
                           const VideoCore::SubresourceRange& sub_range);
+    /// gow3: the stencil aspect alone; the depth aspect and the images' flags stay as they are.
+    void CopyStencil(VideoCore::Image* src, VideoCore::Image* dst);
 
     void ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                       const VideoCore::SubresourceRange& src_range,

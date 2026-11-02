@@ -345,6 +345,9 @@ public:
         return {};
     }
 
+    /// The depth image whose stencil plane starts at `address`, if any.
+    [[nodiscard]] ImageId FindStencilPlaneDepth(VAddr address);
+
     enum class MetaType {
         CMask,
         FMask,

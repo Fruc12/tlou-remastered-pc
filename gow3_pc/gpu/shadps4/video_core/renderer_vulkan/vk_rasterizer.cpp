@@ -3068,6 +3068,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             runtime.ClearImage(&image, desc.view_info.range, vk::ClearValue{});
         }
     }
+    if (cs.pgm_hash == 0x82c46b8b) {
+        CopyStencilPlane(cs);
+    }
     // gow3 diagnostics (GOW3_DUMP_CS_CONST=<hex shader hash>): the first 32 dwords (as floats) of
     // every buffer the dispatch reads that is up to 4 KiB, with a timestamp, 2000 lines at most.
     static const u64 dump_cs = [] {
@@ -6854,6 +6857,43 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
     runtime.CopyDepthStencil(&read_image, &write_image, sub_range);
 
     ScopeMarkerEnd();
+}
+
+// gow3 1 Nov 2026 (The Last of Us, GOW3_STENCIL_PLANE_COPY=0 turns it off): cs 82c46b8b copies
+// memory, and the game uses it on whole depth buffers. The stencil plane has no bytes in memory
+// here, it lives in the depth image: copied as memory it arrived empty, and blood decals, which
+// skip characters by the stencil of the copy, painted Joel.
+void Rasterizer::CopyStencilPlane(const Shader::Info& cs) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_STENCIL_PLANE_COPY");
+        return !env || env[0] != '0';
+    }();
+    if (!enabled) {
+        return;
+    }
+    VAddr source = 0;
+    VAddr target = 0;
+    for (const auto& desc : cs.buffers) {
+        if (desc.IsSpecial()) {
+            continue;
+        }
+        (desc.is_written ? target : source) = desc.GetSharp(cs).base_address;
+    }
+    if (!source || !target) {
+        return;
+    }
+    const VideoCore::ImageId source_id = texture_cache.FindStencilPlaneDepth(source);
+    const VideoCore::ImageId target_id = texture_cache.FindStencilPlaneDepth(target);
+    if (!source_id || !target_id || source_id == target_id) {
+        return;
+    }
+    runtime.BeforeImageAccess();
+    auto& source_image = texture_cache.GetImage(source_id);
+    auto& target_image = texture_cache.GetImage(target_id);
+    if (!(source_image.aspect_mask & target_image.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
+        return;
+    }
+    runtime.CopyStencil(&source_image, &target_image);
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds,

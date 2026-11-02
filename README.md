@@ -10,7 +10,8 @@ and a Vulkan renderer (the shadPS4 video core) executes the PS4 GPU work.
 
 ## Status
 
-Work in progress, playable from the prologue on, with rough edges.
+Work in progress, reported playable from start to finish by a player, with one crash along the way
+that is not fixed yet, and with rough edges.
 
 - **Frame rate:** on a laptop with a Core i7-8750H and a GTX 1050 Ti Mobile (4 GB), 60 FPS in light
   areas and about 40-44 FPS in the heaviest area tested, where the CPU side of the renderer is the

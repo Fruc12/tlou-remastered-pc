@@ -803,6 +803,58 @@ void Runtime::CopyStencil(VideoCore::Image* src, VideoCore::Image* dst) {
     dst->flags |= VideoCore::ImageFlagBits::GpuModified;
 }
 
+void Runtime::CopyStencilToColor(VideoCore::Image* src, VideoCore::Image* dst) {
+    const u32 width = std::min(src->info.size.width, dst->info.size.width);
+    const u32 height = std::min(src->info.size.height, dst->info.size.height);
+    const auto staging = staging_pool.Request(u64(width) * height, VideoCore::MemoryType::DeviceLocal);
+
+    scheduler.EndRendering();
+
+    bool needs_flush =
+        Transit(src, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eCopy,
+                vk::AccessFlagBits2::eTransferRead);
+    needs_flush |= Transit(dst, vk::ImageLayout::eTransferDstOptimal,
+                           vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
+    needs_flush |= IsBufferAccessed(staging.buffer, staging.offset, u64(width) * height);
+    if (needs_flush) {
+        FlushBarriers();
+    }
+
+    const vk::BufferImageCopy download = {
+        .bufferOffset = staging.offset,
+        .imageSubresource{
+            .aspectMask = vk::ImageAspectFlagBits::eStencil,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {width, height, 1},
+    };
+    auto upload = download;
+    upload.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+
+    scheduler.Record([src_image = src->GetImage(), dst_image = dst->GetImage(),
+                      handle = staging.buffer->Handle(), download,
+                      upload](vk::CommandBuffer cmdbuf) {
+        cmdbuf.copyImageToBuffer(src_image, vk::ImageLayout::eTransferSrcOptimal, handle, download);
+        const vk::MemoryBarrier2 post_copy_barrier = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1u,
+            .pMemoryBarriers = &post_copy_barrier,
+        });
+        cmdbuf.copyBufferToImage(handle, dst_image, vk::ImageLayout::eTransferDstOptimal, upload);
+    });
+
+    dst->flags |= VideoCore::ImageFlagBits::GpuModified;
+    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+}
+
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {

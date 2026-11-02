@@ -3068,8 +3068,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             runtime.ClearImage(&image, desc.view_info.range, vk::ClearValue{});
         }
     }
-    if (cs.pgm_hash == 0x82c46b8b) {
-        CopyStencilPlane(cs);
+    if (cs.pgm_hash == 0x82c46b8b && CopyStencilPlane(cs)) {
+        return;
     }
     // gow3 diagnostics (GOW3_DUMP_CS_CONST=<hex shader hash>): the first 32 dwords (as floats) of
     // every buffer the dispatch reads that is up to 4 KiB, with a timestamp, 2000 lines at most.
@@ -6862,14 +6862,17 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 // gow3 1 Nov 2026 (The Last of Us, GOW3_STENCIL_PLANE_COPY=0 turns it off): cs 82c46b8b copies
 // memory, and the game uses it on whole depth buffers. The stencil plane has no bytes in memory
 // here, it lives in the depth image: copied as memory it arrived empty, and blood decals, which
-// skip characters by the stencil of the copy, painted Joel.
-void Rasterizer::CopyStencilPlane(const Shader::Info& cs) {
+// skip characters by the stencil of the copy, painted Joel. The copy into an R8Uint texture feeds
+// the half-resolution depth (ps ebc15a8b), which drops pixels with stencil bit 16: it replaces the
+// dispatch, whose write of the empty bytes would have the texture uploaded from memory again.
+// Returns whether the dispatch is done.
+bool Rasterizer::CopyStencilPlane(const Shader::Info& cs) {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_STENCIL_PLANE_COPY");
         return !env || env[0] != '0';
     }();
     if (!enabled) {
-        return;
+        return false;
     }
     VAddr source = 0;
     VAddr target = 0;
@@ -6880,20 +6883,30 @@ void Rasterizer::CopyStencilPlane(const Shader::Info& cs) {
         (desc.is_written ? target : source) = desc.GetSharp(cs).base_address;
     }
     if (!source || !target) {
-        return;
+        return false;
     }
     const VideoCore::ImageId source_id = texture_cache.FindStencilPlaneDepth(source);
-    const VideoCore::ImageId target_id = texture_cache.FindStencilPlaneDepth(target);
-    if (!source_id || !target_id || source_id == target_id) {
-        return;
+    if (!source_id) {
+        return false;
+    }
+    if (const VideoCore::ImageId target_id = texture_cache.FindStencilPlaneDepth(target)) {
+        auto& source_image = texture_cache.GetImage(source_id);
+        auto& target_image = texture_cache.GetImage(target_id);
+        if (source_id != target_id &&
+            (source_image.aspect_mask & target_image.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
+            runtime.BeforeImageAccess();
+            runtime.CopyStencil(&source_image, &target_image);
+        }
+        return false;
+    }
+    const VideoCore::ImageId texture_id = texture_cache.FindStencilTexture(target);
+    auto& source_image = texture_cache.GetImage(source_id);
+    if (!texture_id || !(source_image.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
+        return false;
     }
     runtime.BeforeImageAccess();
-    auto& source_image = texture_cache.GetImage(source_id);
-    auto& target_image = texture_cache.GetImage(target_id);
-    if (!(source_image.aspect_mask & target_image.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
-        return;
-    }
-    runtime.CopyStencil(&source_image, &target_image);
+    runtime.CopyStencilToColor(&source_image, &texture_cache.GetImage(texture_id));
+    return true;
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds,

@@ -1336,6 +1336,16 @@ ImageId TextureCache::FindStencilPlaneDepth(VAddr address) {
     return depth_id;
 }
 
+ImageId TextureCache::FindStencilTexture(VAddr address) {
+    ImageId texture_id{};
+    ForEachImageInRegion(address, 1, [&](ImageId image_id, Image& image) {
+        if (image.info.guest_address == address && image.info.pixel_format == vk::Format::eR8Uint) {
+            texture_id = image_id;
+        }
+    });
+    return texture_id;
+}
+
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, ViewMemo* memo,
                                      bool refresh) {
     Image& image = slot_images[image_id];

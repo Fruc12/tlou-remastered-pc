@@ -347,6 +347,8 @@ public:
 
     /// The depth image whose stencil plane starts at `address`, if any.
     [[nodiscard]] ImageId FindStencilPlaneDepth(VAddr address);
+    /// The 8-bit integer texture starting at `address`, if any.
+    [[nodiscard]] ImageId FindStencilTexture(VAddr address);
 
     enum class MetaType {
         CMask,

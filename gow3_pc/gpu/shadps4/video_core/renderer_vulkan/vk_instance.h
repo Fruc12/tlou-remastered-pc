@@ -285,24 +285,6 @@ public:
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
     }
 
-    /// gow3 3 Nov 2026: the subgroup size a shader stage must be compiled for, 0 for the driver's
-    /// choice. Without 64, the recompiler lowers wave64 code for SubgroupSize(), but a driver
-    /// with a range of sizes (Intel: 16 to 32) picks one per shader, and a SIMD16 build would
-    /// break that lowering.
-    u32 RequiredSubgroupSize(vk::ShaderStageFlags stage) const {
-        if (IsSubgroupSize64Supported()) {
-            return 64;
-        }
-        if (!vk13_features.subgroupSizeControl ||
-            vk13_props.minSubgroupSize == vk13_props.maxSubgroupSize ||
-            !(vk13_props.requiredSubgroupSizeStages & stage) ||
-            SubgroupSize() < vk13_props.minSubgroupSize ||
-            SubgroupSize() > vk13_props.maxSubgroupSize) {
-            return 0;
-        }
-        return SubgroupSize();
-    }
-
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
     bool IsWorkgroupMemoryExplicitLayoutSupported() const {
         return workgroup_memory_explicit_layout &&

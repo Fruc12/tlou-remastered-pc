@@ -34,6 +34,7 @@ private:
     Buffer download_buffer;
     std::array<u64, MaxPendingFaults> fault_areas{};
     u32 current_area{};
+    bool fault_buffer_cleared{};
     vk::UniqueDescriptorSetLayout fault_process_desc_layout;
     vk::UniquePipeline fault_process_pipeline;
     vk::UniquePipelineLayout fault_process_pipeline_layout;

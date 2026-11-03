@@ -921,6 +921,12 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
         return false;
     }
+    // gow3 3 Nov 2026: shaders cached with direct memory access read guest memory by address;
+    // with GOW3_DIRECT_MEMORY_ACCESS=0 they are compiled again without it (the cache holds no
+    // trace of the setting, so turning it off in the launcher changed nothing).
+    if (info.uses_dma && !EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+        return false;
+    }
     // gow3 2 Nov 2026: the rain's alpha is scaled by the recompiler (GOW3_RAIN_SCALE); caches made
     // before that hold the original, and this small shader compiles in no time.
     if (info.pgm_hash == 0x2288df23) {

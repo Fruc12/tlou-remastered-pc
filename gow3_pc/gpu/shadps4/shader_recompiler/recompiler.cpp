@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <bit>
+#include <cstdlib>
 #include "common/logging/classes.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/frontend/structured_control_flow.h"
 #include "shader_recompiler/frontend/translate/translate.h"
+#include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/ir/program.h"
@@ -160,6 +162,28 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::DeadCodeEliminationPass(program);
     if (info.sw_stage == SwStage::Fragment && profile.needs_integer_interpolation_fix) {
         Shader::Optimization::InterpolatedIntegerPass(program);
+    }
+    // gow3 2 Nov 2026 (The Last of Us, GOW3_RAIN_SCALE sets it, 1 is the game's): rain falls as
+    // solid white streaks. Compared with a PS4 video of the same scene, they are about 8 times
+    // too strong. Why is not known: the noise and the rain shadow test are not it, and the
+    // constants match the shader's formula, so this scales the alpha's strength.
+    if (info.pgm_hash == 0x2288df23) {
+        const char* env = std::getenv("GOW3_RAIN_SCALE");
+        const float scale = env ? std::strtof(env, nullptr) : 0.12f;
+        for (IR::Block* const block : program.blocks) {
+            for (IR::Inst& inst : block->Instructions()) {
+                if (inst.GetOpcode() != IR::Opcode::FPSaturate32 || inst.Arg(0).IsImmediate()) {
+                    continue;
+                }
+                IR::Inst* const alpha = inst.Arg(0).TryInst();
+                if (alpha && alpha->GetOpcode() == IR::Opcode::FPMul32) {
+                    IR::IREmitter ir{*alpha->GetParent(),
+                                     IR::Block::InstructionList::s_iterator_to(*alpha)};
+                    const IR::F32 strength{alpha->Arg(0)};
+                    alpha->SetArg(0, ir.FPMul(strength, ir.Imm32(scale)));
+                }
+            }
+        }
     }
     Shader::Optimization::CollectShaderInfoPass(program, profile);
     Shader::IR::DumpProgram(program, info);

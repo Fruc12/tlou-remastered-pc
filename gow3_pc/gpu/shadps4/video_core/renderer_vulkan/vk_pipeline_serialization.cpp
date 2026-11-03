@@ -921,6 +921,11 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
         return false;
     }
+    // gow3 2 Nov 2026: the rain's alpha is scaled by the recompiler (GOW3_RAIN_SCALE); caches made
+    // before that hold the original, and this small shader compiles in no time.
+    if (info.pgm_hash == 0x2288df23) {
+        return false;
+    }
 
     fetch_shader_data = spec.fetch_shader_data;
     return true;

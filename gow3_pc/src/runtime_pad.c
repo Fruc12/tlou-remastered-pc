@@ -19,6 +19,7 @@
 #include "runtime.h"
 #include "gpu/gow3gpu.h"
 #include "runtime_gamesettings.h"
+#include "runtime_mouselook.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -523,6 +524,7 @@ static int mouse_look_debug(void) {
 }
 int runtime_pad_aim_held(void) { return __atomic_load_n(&pad_aim_held,__ATOMIC_RELAXED); }
 static int sample_mouse(PadData *d) {
+    runtime_mouselook_set_stick_boost(1.0f); /* more only below, for a mouse past the full stick */
     if (!mouse_enabled()) return 0;
     /* 20 Oct 2026: the aim sensitivity while aiming, the up/down speed and the left/right invert
      * (the mouse look handlers apply the same). */
@@ -576,12 +578,17 @@ static int sample_mouse(PadData *d) {
     if (direct) { vx=vy=0; return used; }
     /* The games turn at about (deflection past a ~0.15 dead zone)^1.5 of their full speed. The
      * deflection is the inverse of that, so the turn follows the mouse's speed evenly (the linear
-     * mapping before turned slow movements too little and fast ones too much). */
-    float sx=vx*sensitivity*0.08f*invert_x, sy=vy*sensitivity*0.08f*invert*(vertical>0.0f ? vertical : 1.0f);
+     * mapping before turned slow movements too little and fast ones too much). 3 Nov 2026: 0.40,
+     * five times the old 0.08: the old 500% is now 100% (the player's choice in TLOU). */
+    float sx=vx*sensitivity*0.40f*invert_x, sy=vy*sensitivity*0.40f*invert*(vertical>0.0f ? vertical : 1.0f);
     const float magnitude=sqrtf(sx*sx+sy*sy);
     if (magnitude<0.002f) return used;
-    const float shaped=powf(magnitude>1.0f ? 1.0f : magnitude,2.0f/3.0f);
-    const float out=0.15f+0.85f*shaped>1.0f ? 1.0f : 0.15f+0.85f*shaped;
+    const float shaped=powf(magnitude,2.0f/3.0f);
+    float out=0.15f+0.85f*shaped;
+    /* Past the full stick: the stick stays full and the game multiplies its right stick by the
+     * rest (runtime_mouselook.h, stick boost; without it the camera stops at the full stick's
+     * speed). */
+    if (out>1.0f) { runtime_mouselook_set_stick_boost(out>50.0f ? 50.0f : out); out=1.0f; }
     sx*=out/magnitude; sy*=out/magnitude;
     d->right_x=(uint8_t)(sx<-1.0f ? 0 : sx>1.0f ? 255 : (int)(128.0f+sx*127.0f));
     d->right_y=(uint8_t)(sy<-1.0f ? 0 : sy>1.0f ? 255 : (int)(128.0f+sy*127.0f));

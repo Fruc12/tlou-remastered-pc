@@ -23,5 +23,20 @@ typedef struct {
 int runtime_mouselook_enabled(void);
 const MouseLookSite *runtime_mouselook_sites(unsigned *count);
 void runtime_mouselook_set_image(unsigned char *image);
+/* Right stick boost (3 Nov 2026, The Last of Us Remastered 1.11): the game turns the camera no
+ * faster than the right stick at full deflection, so a mouse moved fast hit that cap whatever its
+ * sensitivity. The pad conversion (0xa4d360: byte / 127 - 1, dead zone 0.08, / 0.84) clamps each
+ * right stick axis to -1..1 (vminps, vmaxps) at these sites; the loader (probe.c,
+ * install_stick_boost) moves each clamp into a stub that then multiplies the axis by the boost
+ * runtime_pad.c sets per pad read: 1 for controllers and a still mouse, more when the mouse asks
+ * for more than the full stick. GOW3_STICK_BOOST=0 leaves the game's clamp alone. */
+typedef struct {
+    const char *game;
+    uint64_t offset;               /* image offset of the clamp: vminps xmm4, xmm8; vmaxps xmm4, xmm0 */
+    unsigned char expected[14];    /* the clamp (9 bytes, replayed) and the axis's store after it */
+} StickBoostSite;
+const StickBoostSite *runtime_mouselook_boost_sites(unsigned *count);
+void runtime_mouselook_set_boost_slot(float *slot);
+void runtime_mouselook_set_stick_boost(float boost);
 /* runtime_pad.c: the aim button (L2) was held at the last pad read. */
 int runtime_pad_aim_held(void);

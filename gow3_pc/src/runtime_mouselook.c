@@ -23,3 +23,25 @@ const MouseLookSite *runtime_mouselook_sites(unsigned *count) {
     *count = 0;
     return NULL;
 }
+
+/* The right stick's x and y clamps, each followed by its store (vmovss [rdi + 0x18 / 0x1c], xmm4). */
+static const StickBoostSite boost_sites[] = {
+    {"The Last of Us Remastered (right stick x)", 0xa4d48d,
+     {0xc4, 0xc1, 0x58, 0x5d, 0xe0, 0xc5, 0xd8, 0x5f, 0xe0, 0xc5, 0xfa, 0x11, 0x67, 0x18}},
+    {"The Last of Us Remastered (right stick y)", 0xa4d4d6,
+     {0xc4, 0xc1, 0x58, 0x5d, 0xe0, 0xc5, 0xd8, 0x5f, 0xe0, 0xc5, 0xfa, 0x11, 0x67, 0x1c}},
+};
+static float *boost_slot;
+
+const StickBoostSite *runtime_mouselook_boost_sites(unsigned *count) {
+    const char *env = getenv("GOW3_STICK_BOOST");
+    *count = env && env[0] == '0' ? 0 : sizeof(boost_sites) / sizeof(boost_sites[0]);
+    return boost_sites;
+}
+
+void runtime_mouselook_set_boost_slot(float *slot) { __atomic_store_n(&boost_slot, slot, __ATOMIC_RELEASE); }
+
+void runtime_mouselook_set_stick_boost(float boost) {
+    float *slot = __atomic_load_n(&boost_slot, __ATOMIC_ACQUIRE);
+    if (slot) __atomic_store(slot, &boost, __ATOMIC_RELAXED);
+}

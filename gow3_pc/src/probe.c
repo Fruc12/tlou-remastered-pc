@@ -883,6 +883,45 @@ static void install_mouse_look(Segment *segments, uint64_t count, uint64_t size)
     if (stubs) protect(stubs, page_size, 5);
     if (!installed) puts("Mouse look: no known camera code in this executable (mouse acts as the right stick)");
 }
+/* Right stick boost (src/runtime_mouselook.h): each site's clamp jumps to a stub that replays it,
+ * multiplies xmm4 (the clamped axis) by the boost and jumps back. The boost lives in the stub
+ * page (executable and writable: the pad writes it per read, away from the code). */
+static void install_stick_boost(Segment *segments, uint64_t count, uint64_t size) {
+    unsigned n = 0, installed = 0;
+    const StickBoostSite *sites = runtime_mouselook_boost_sites(&n);
+    unsigned char *stubs = NULL;
+    enum { STUB = 64, SLOT = 0x800, CLAMP = 9 };
+    for (unsigned i = 0; i < n && (i + 1) * STUB <= SLOT; ++i) {
+        const StickBoostSite *site = &sites[i];
+        if (site->offset + sizeof(site->expected) > size || !mapped(segments, count, site->offset, sizeof(site->expected)) ||
+            memcmp(image + site->offset, site->expected, sizeof(site->expected))) continue;
+        if (!stubs && !(stubs = allocate_near_image(size))) {
+            puts("Stick boost: unavailable (no stub page in range)");
+            return;
+        }
+        unsigned char *p = stubs + i * STUB;
+        unsigned k = 0;
+        memcpy(p, site->expected, CLAMP); k += CLAMP;
+        const int32_t slot = (int32_t)((stubs + SLOT) - (p + k + 8));
+        p[k++] = 0xc5; p[k++] = 0xda; p[k++] = 0x59; p[k++] = 0x25; /* vmulss xmm4, xmm4, [rip + slot] */
+        memcpy(p + k, &slot, 4); k += 4;
+        static const unsigned char jump[] = {0xff, 0x25, 0x00, 0x00, 0x00, 0x00}; /* jmp [rip+0] */
+        memcpy(p + k, jump, sizeof(jump)); k += sizeof(jump);
+        const uint64_t resume = (uint64_t)(uintptr_t)(image + site->offset + CLAMP);
+        memcpy(p + k, &resume, 8);
+        if (!install_jump(site->offset, CLAMP, p)) {
+            printf("Stick boost: %s unavailable (stub out of range)\n", site->game);
+            continue;
+        }
+        printf("Stick boost: %s at image offset %#llx\n", site->game, (unsigned long long)site->offset);
+        ++installed;
+    }
+    if (!stubs) return;
+    const float one = 1.0f;
+    memcpy(stubs + SLOT, &one, sizeof(one));
+    protect(stubs, page_size, 7);
+    if (installed) runtime_mouselook_set_boost_slot((float *)(void *)(stubs + SLOT));
+}
 /* Damage dealt/taken and green/blue/gold orb multipliers (src/damage_hook.h, src/orb_hook.h):
  * the stubs read the menu's floats directly, so changes apply on the next hit or pickup. */
 static void install_stat_multipliers(Segment *segments, uint64_t count, uint64_t size) {
@@ -1268,6 +1307,7 @@ int main(int argc, char **argv) {
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
     if (gpu_enabled) install_mouse_look(segments, ns, size);
+    if (gpu_enabled) install_stick_boost(segments, ns, size);
     runtime_gamesettings_set_image(image, size);
     if (gpu_enabled && game_hooks) {
         install_orb_multiplier(segments, ns, size);

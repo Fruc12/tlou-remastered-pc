@@ -491,8 +491,16 @@ static void sync_controls(void) {
     const int pad=apply_button_map(&pad_map,&stick_keys,controls.pad_map,MAP_PAD);
     const int keys=apply_button_map(&key_map,&stick_keys,controls.key_map,MAP_KEYBOARD);
     const int mouse=apply_button_map(&mouse_map,&stick_keys,controls.mouse_map,MAP_MOUSE);
-    if (pad || keys || mouse)
+    if (pad || keys || mouse) {
         printf("Runtime: pad map: %d gamepad, %d keyboard and %d mouse entries\n",pad,keys,mouse);
+        /* 3 Nov 2026: the keys and mouse buttons in use (the launcher's Controls window writes
+         * the maps), so the log shows what the game took. */
+        static char text[2048];
+        describe_map(&key_map,&stick_keys,MAP_KEYBOARD,text,sizeof(text));
+        printf("Runtime: controls: keyboard map %s\n",text);
+        describe_map(&mouse_map,&stick_keys,MAP_MOUSE,text,sizeof(text));
+        printf("Runtime: controls: mouse button map %s\n",text);
+    }
     printf("Runtime: controls: mouse %s (sensitivity %.2f%s), controller camera speed %.2f, button icons %d\n",
            controls.mouse ? "on" : "off",controls.mouse_sens,controls.mouse_invert ? ", inverted" : "",
            controls.stick_speed,controls.prompts);

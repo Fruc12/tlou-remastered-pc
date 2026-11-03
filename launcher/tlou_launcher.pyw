@@ -693,6 +693,184 @@ DEBUG_TEXT = {
         '白い雨の修正'),
 }
 
+# Controls window: the keyboard and mouse maps the game reads from tlou.ini (key_map, mouse_map:
+# "<action>=<SDL key or mouse name>,...", gow3_pc/src/runtime_pad.c apply_button_map), written
+# complete like the in-game menu's Controls tab. (group, [(action, label, keys only)]).
+CONTROLS = [
+    ("Movimento", [("ls_up", "Andar para frente", True), ("ls_down", "Andar para trás", True),
+                   ("ls_left", "Andar para a esquerda", True), ("ls_right", "Andar para a direita", True)]),
+    ("Câmera", [("rs_up", "Olhar para cima", True), ("rs_down", "Olhar para baixo", True),
+                ("rs_left", "Olhar para a esquerda", True), ("rs_right", "Olhar para a direita", True)]),
+    ("Botões", [("cross", "Xis (×)", False), ("circle", "Círculo (○)", False), ("square", "Quadrado (□)", False),
+                ("triangle", "Triângulo (△)", False), ("l1", "L1", False), ("r1", "R1", False),
+                ("l2", "L2 (mirar)", False), ("r2", "R2 (atirar)", False), ("l3", "L3", False), ("r3", "R3", False),
+                ("options", "Options (pausa)", False), ("touchpad_left", "Touchpad, lado esquerdo", False),
+                ("touchpad_right", "Touchpad, lado direito", False), ("shake", "Agitar o controle (lanterna)", False)]),
+    ("Direcional", [("up", "Cima", False), ("down", "Baixo", False), ("left", "Esquerda", False),
+                    ("right", "Direita", False)]),
+]
+# runtime_pad.c's defaults: [(kind, name)], kind "key" (SDL scancode name) or "mouse".
+DEFAULT_CONTROLS = {
+    "ls_up": [("key", "W")], "ls_down": [("key", "S")], "ls_left": [("key", "A")], "ls_right": [("key", "D")],
+    "rs_up": [("key", "Up")], "rs_down": [("key", "Down")], "rs_left": [("key", "Left")], "rs_right": [("key", "Right")],
+    "cross": [("key", "Space")], "circle": [("key", "Left Ctrl")], "square": [("key", "F")], "triangle": [("key", "R")],
+    "l1": [("key", "Q"), ("mouse", "x1")], "r1": [("key", "E"), ("mouse", "x2")], "l2": [("mouse", "right")],
+    "r2": [("mouse", "left")], "l3": [("key", "Left Shift")], "r3": [("key", "V"), ("mouse", "middle")],
+    "options": [("key", "Escape"), ("key", "Return")], "touchpad_left": [("key", "Tab")],
+    "touchpad_right": [("key", "Backspace")], "shake": [("key", "G")],
+    "up": [("key", "3")], "down": [("key", "4")], "left": [("key", "1"), ("mouse", "wheel_down")],
+    "right": [("key", "2"), ("mouse", "wheel_up")],
+}
+CONTROL_SLOTS = 2   # sources per action, as in the in-game menu
+MOUSE_NAMES = {"left": "Botão esquerdo do mouse", "right": "Botão direito do mouse", "middle": "Botão do meio do mouse",
+               "x1": "Botão lateral 1 do mouse", "x2": "Botão lateral 2 do mouse",
+               "wheel_up": "Roda do mouse para cima", "wheel_down": "Roda do mouse para baixo"}
+MOUSE_BUTTONS = {1: "left", 2: "middle", 3: "right", 4: "x1", 5: "x2", 8: "x1", 9: "x2"}   # Tk's numbers
+# Keys by Windows scan code (set 1), as SDL names them; "," cannot be bound (it separates the entries).
+SCAN_NAMES = {0x01: "Escape", 0x0C: "-", 0x0D: "=", 0x0E: "Backspace", 0x0F: "Tab", 0x1A: "[", 0x1B: "]",
+              0x1C: "Return", 0x1D: "Left Ctrl", 0x27: ";", 0x28: "'", 0x29: "`", 0x2A: "Left Shift", 0x2B: "\\",
+              0x34: ".", 0x35: "/", 0x36: "Right Shift", 0x37: "Keypad *", 0x38: "Left Alt", 0x39: "Space",
+              0x3A: "CapsLock", 0x45: "Numlock", 0x46: "ScrollLock", 0x4A: "Keypad -", 0x4E: "Keypad +",
+              0x53: "Keypad .", 0x57: "F11", 0x58: "F12"}
+SCAN_NAMES.update({0x02 + i: str((i + 1) % 10) for i in range(10)})
+SCAN_NAMES.update({0x10 + i: c for i, c in enumerate("QWERTYUIOP")})
+SCAN_NAMES.update({0x1E + i: c for i, c in enumerate("ASDFGHJKL")})
+SCAN_NAMES.update({0x2C + i: c for i, c in enumerate("ZXCVBNM")})
+SCAN_NAMES.update({0x3B + i: f"F{i + 1}" for i in range(10)})
+SCAN_NAMES.update({scan: f"Keypad {n}" for scan, n in zip((0x47, 0x48, 0x49, 0x4B, 0x4C, 0x4D, 0x4F, 0x50, 0x51, 0x52),
+                                                          "7894561230")})
+# Keys Tk tells apart by name (sides, the extended keys); the rest go by scan code.
+KEYSYM_NAMES = {"Control_L": "Left Ctrl", "Control_R": "Right Ctrl", "Shift_L": "Left Shift", "Shift_R": "Right Shift",
+                "Alt_L": "Left Alt", "Alt_R": "Right Alt", "Win_L": "Left GUI", "Win_R": "Right GUI", "App": "Application",
+                "Up": "Up", "Down": "Down", "Left": "Left", "Right": "Right", "Insert": "Insert", "Home": "Home",
+                "End": "End", "Prior": "PageUp", "Next": "PageDown", "KP_Enter": "Keypad Enter", "KP_Divide": "Keypad /",
+                "Pause": "Pause", "Print": "PrintScreen"}
+KEY_LABELS = {"Space": "Espaço", "Left Ctrl": "Ctrl esquerdo", "Right Ctrl": "Ctrl direito", "Left Shift": "Shift esquerdo",
+              "Right Shift": "Shift direito", "Left Alt": "Alt esquerdo", "Right Alt": "Alt direito",
+              "Up": "↑", "Down": "↓", "Left": "←", "Right": "→", "Return": "Enter", "Escape": "Esc"}
+CONTROL_TEXT = {
+    'Teclado e mouse': ('Keyboard and mouse', 'Teclado y ratón', 'Clavier et souris', 'Tastatur und Maus',
+                        'Tastiera e mouse', 'Klawiatura i mysz', 'Клавиатура и мышь', 'キーボードとマウス'),
+    'Mouse': ('Mouse', 'Ratón', 'Souris', 'Maus', 'Mouse', 'Mysz', 'Мышь', 'マウス'),
+    'Clique numa caixa e pressione a tecla ou o botão do mouse. Esc cancela, Delete limpa.\n'
+    'Movimento e câmera aceitam só teclas. Vale na próxima vez que o jogo abrir.': (
+        'Click a box and press the key or mouse button. Esc cancels, Delete clears.\n'
+        'Movement and camera take keys only. Takes effect the next time the game starts.',
+        'Haz clic en una casilla y pulsa la tecla o el botón del ratón. Esc cancela, Supr borra.\n'
+        'Movimiento y cámara solo aceptan teclas. Se aplica la próxima vez que se abra el juego.',
+        'Cliquez sur une case puis appuyez sur la touche ou le bouton de la souris. Échap annule, Suppr efface.\n'
+        'Déplacement et caméra : touches uniquement. S\'applique au prochain lancement du jeu.',
+        'Feld anklicken, dann Taste oder Maustaste drücken. Esc bricht ab, Entf löscht.\n'
+        'Bewegung und Kamera nur mit Tasten. Gilt beim nächsten Spielstart.',
+        'Fai clic su una casella e premi il tasto o il pulsante del mouse. Esc annulla, Canc cancella.\n'
+        'Movimento e telecamera accettano solo tasti. Vale al prossimo avvio del gioco.',
+        'Kliknij pole i naciśnij klawisz lub przycisk myszy. Esc anuluje, Delete czyści.\n'
+        'Ruch i kamera tylko z klawiatury. Działa od następnego uruchomienia gry.',
+        'Щёлкните поле и нажмите клавишу или кнопку мыши. Esc — отмена, Delete — очистить.\n'
+        'Движение и камера — только клавиши. Действует при следующем запуске игры.',
+        '枠をクリックしてキーかマウスボタンを押してください。Esc で取り消し、Delete で解除。\n'
+        '移動とカメラはキーのみ。次回ゲーム起動時に反映されます。'),
+    'Vale na próxima vez que o jogo abrir.': (
+        'Takes effect the next time the game starts.', 'Se aplica la próxima vez que se abra el juego.',
+        'S\'applique au prochain lancement du jeu.', 'Gilt beim nächsten Spielstart.',
+        'Vale al prossimo avvio del gioco.', 'Działa od następnego uruchomienia gry.',
+        'Действует при следующем запуске игры.', '次回ゲーム起動時に反映されます。'),
+    'Pressione...': ('Press...', 'Pulsa...', 'Appuyez...', 'Taste drücken...', 'Premi...', 'Naciśnij...',
+                     'Нажмите...', '入力待ち...'),
+    'Movimento': ('Movement', 'Movimiento', 'Déplacement', 'Bewegung', 'Movimento', 'Ruch', 'Движение', '移動'),
+    'Câmera': ('Camera', 'Cámara', 'Caméra', 'Kamera', 'Telecamera', 'Kamera', 'Камера', 'カメラ'),
+    'Botões': ('Buttons', 'Botones', 'Boutons', 'Tasten', 'Pulsanti', 'Przyciski', 'Кнопки', 'ボタン'),
+    'Direcional': ('D-pad', 'Cruceta', 'Croix directionnelle', 'Steuerkreuz', 'Croce direzionale', 'Krzyżak',
+                   'Крестовина', '方向キー'),
+    'Andar para frente': ('Move forward', 'Avanzar', 'Avancer', 'Vorwärts', 'Avanti', 'Do przodu', 'Вперёд', '前進'),
+    'Andar para trás': ('Move back', 'Retroceder', 'Reculer', 'Rückwärts', 'Indietro', 'Do tyłu', 'Назад', '後退'),
+    'Andar para a esquerda': ('Move left', 'Moverse a la izquierda', 'Aller à gauche', 'Nach links', 'Sinistra',
+                              'W lewo', 'Влево', '左へ移動'),
+    'Andar para a direita': ('Move right', 'Moverse a la derecha', 'Aller à droite', 'Nach rechts', 'Destra',
+                             'W prawo', 'Вправо', '右へ移動'),
+    'Olhar para cima': ('Look up', 'Mirar arriba', 'Regarder en haut', 'Nach oben schauen', 'Guarda su',
+                        'Patrz w górę', 'Смотреть вверх', '上を見る'),
+    'Olhar para baixo': ('Look down', 'Mirar abajo', 'Regarder en bas', 'Nach unten schauen', 'Guarda giù',
+                         'Patrz w dół', 'Смотреть вниз', '下を見る'),
+    'Olhar para a esquerda': ('Look left', 'Mirar a la izquierda', 'Regarder à gauche', 'Nach links schauen',
+                              'Guarda a sinistra', 'Patrz w lewo', 'Смотреть влево', '左を見る'),
+    'Olhar para a direita': ('Look right', 'Mirar a la derecha', 'Regarder à droite', 'Nach rechts schauen',
+                             'Guarda a destra', 'Patrz w prawo', 'Смотреть вправо', '右を見る'),
+    'Xis (×)': ('Cross (×)', 'Equis (×)', 'Croix (×)', 'Kreuz (×)', 'Croce (×)', 'Krzyżyk (×)', 'Крест (×)', 'バツ (×)'),
+    'Círculo (○)': ('Circle (○)', 'Círculo (○)', 'Rond (○)', 'Kreis (○)', 'Cerchio (○)', 'Kółko (○)', 'Круг (○)',
+                    'マル (○)'),
+    'Quadrado (□)': ('Square (□)', 'Cuadrado (□)', 'Carré (□)', 'Quadrat (□)', 'Quadrato (□)', 'Kwadrat (□)',
+                     'Квадрат (□)', 'シカク (□)'),
+    'Triângulo (△)': ('Triangle (△)', 'Triángulo (△)', 'Triangle (△)', 'Dreieck (△)', 'Triangolo (△)',
+                      'Trójkąt (△)', 'Треугольник (△)', 'サンカク (△)'),
+    'L2 (mirar)': ('L2 (aim)', 'L2 (apuntar)', 'L2 (viser)', 'L2 (zielen)', 'L2 (mirare)', 'L2 (celowanie)',
+                   'L2 (прицел)', 'L2 (構える)'),
+    'R2 (atirar)': ('R2 (fire)', 'R2 (disparar)', 'R2 (tirer)', 'R2 (schießen)', 'R2 (sparare)', 'R2 (strzał)',
+                    'R2 (выстрел)', 'R2 (撃つ)'),
+    'Options (pausa)': ('Options (pause)', 'Options (pausa)', 'Options (pause)', 'Options (Pause)', 'Options (pausa)',
+                        'Options (pauza)', 'Options (пауза)', 'OPTIONS (ポーズ)'),
+    'Touchpad, lado esquerdo': ('Touchpad, left side', 'Panel táctil, lado izquierdo', 'Pavé tactile, côté gauche',
+                                'Touchpad, linke Seite', 'Touchpad, lato sinistro', 'Touchpad, lewa strona',
+                                'Сенсорная панель, слева', 'タッチパッド左'),
+    'Touchpad, lado direito': ('Touchpad, right side', 'Panel táctil, lado derecho', 'Pavé tactile, côté droit',
+                               'Touchpad, rechte Seite', 'Touchpad, lato destro', 'Touchpad, prawa strona',
+                               'Сенсорная панель, справа', 'タッチパッド右'),
+    'Agitar o controle (lanterna)': ('Shake the controller (flashlight)', 'Agitar el mando (linterna)',
+                                     'Secouer la manette (lampe)', 'Controller schütteln (Taschenlampe)',
+                                     'Scuoti il controller (torcia)', 'Potrząśnij padem (latarka)',
+                                     'Встряхнуть геймпад (фонарик)', 'コントローラーを振る (ライト)'),
+    'Cima': ('Up', 'Arriba', 'Haut', 'Oben', 'Su', 'Góra', 'Вверх', '上'),
+    'Baixo': ('Down', 'Abajo', 'Bas', 'Unten', 'Giù', 'Dół', 'Вниз', '下'),
+    'Esquerda': ('Left', 'Izquierda', 'Gauche', 'Links', 'Sinistra', 'Lewo', 'Влево', '左'),
+    'Direita': ('Right', 'Derecha', 'Droite', 'Rechts', 'Destra', 'Prawo', 'Вправо', '右'),
+    'Usar o mouse': ('Use the mouse', 'Usar el ratón', 'Utiliser la souris', 'Maus verwenden', 'Usa il mouse',
+                     'Używaj myszy', 'Использовать мышь', 'マウスを使う'),
+    'Sensibilidade do mouse': ('Mouse sensitivity', 'Sensibilidad del ratón', 'Sensibilité de la souris',
+                               'Mausempfindlichkeit', 'Sensibilità del mouse', 'Czułość myszy',
+                               'Чувствительность мыши', 'マウス感度'),
+    'Sensibilidade ao mirar': ('Aim sensitivity', 'Sensibilidad al apuntar', 'Sensibilité en visée',
+                               'Empfindlichkeit beim Zielen', 'Sensibilità in mira', 'Czułość podczas celowania',
+                               'Чувствительность при прицеливании', 'エイム時の感度'),
+    'Inverter eixo vertical': ('Invert vertical axis', 'Invertir eje vertical', "Inverser l'axe vertical",
+                               'Vertikale Achse umkehren', 'Inverti asse verticale', 'Odwróć oś pionową',
+                               'Инвертировать вертикальную ось', '上下を反転'),
+    'Inverter eixo horizontal': ('Invert horizontal axis', 'Invertir eje horizontal', "Inverser l'axe horizontal",
+                                 'Horizontale Achse umkehren', 'Inverti asse orizzontale', 'Odwróć oś poziomą',
+                                 'Инвертировать горизонтальную ось', '左右を反転'),
+    'Espaço': ('Space', 'Espacio', 'Espace', 'Leertaste', 'Spazio', 'Spacja', 'Пробел', 'スペース'),
+    'Ctrl esquerdo': ('Left Ctrl', 'Ctrl izquierdo', 'Ctrl gauche', 'Strg links', 'Ctrl sinistro', 'Lewy Ctrl',
+                      'Левый Ctrl', '左Ctrl'),
+    'Ctrl direito': ('Right Ctrl', 'Ctrl derecho', 'Ctrl droit', 'Strg rechts', 'Ctrl destro', 'Prawy Ctrl',
+                     'Правый Ctrl', '右Ctrl'),
+    'Shift esquerdo': ('Left Shift', 'Mayús izquierda', 'Maj gauche', 'Umschalt links', 'Maiusc sinistro',
+                       'Lewy Shift', 'Левый Shift', '左Shift'),
+    'Shift direito': ('Right Shift', 'Mayús derecha', 'Maj droite', 'Umschalt rechts', 'Maiusc destro', 'Prawy Shift',
+                      'Правый Shift', '右Shift'),
+    'Alt esquerdo': ('Left Alt', 'Alt izquierdo', 'Alt gauche', 'Alt links', 'Alt sinistro', 'Lewy Alt', 'Левый Alt',
+                     '左Alt'),
+    'Alt direito': ('Right Alt', 'Alt derecho', 'Alt droit', 'Alt rechts', 'Alt destro', 'Prawy Alt', 'Правый Alt',
+                    '右Alt'),
+    'Botão esquerdo do mouse': ('Left mouse button', 'Botón izquierdo del ratón', 'Bouton gauche de la souris',
+                                'Linke Maustaste', 'Tasto sinistro del mouse', 'Lewy przycisk myszy',
+                                'Левая кнопка мыши', 'マウス左ボタン'),
+    'Botão direito do mouse': ('Right mouse button', 'Botón derecho del ratón', 'Bouton droit de la souris',
+                               'Rechte Maustaste', 'Tasto destro del mouse', 'Prawy przycisk myszy',
+                               'Правая кнопка мыши', 'マウス右ボタン'),
+    'Botão do meio do mouse': ('Middle mouse button', 'Botón central del ratón', 'Bouton du milieu de la souris',
+                               'Mittlere Maustaste', 'Tasto centrale del mouse', 'Środkowy przycisk myszy',
+                               'Средняя кнопка мыши', 'マウス中ボタン'),
+    'Botão lateral 1 do mouse': ('Mouse side button 1', 'Botón lateral 1 del ratón', 'Bouton latéral 1 de la souris',
+                                 'Maus-Seitentaste 1', 'Tasto laterale 1 del mouse', 'Boczny przycisk myszy 1',
+                                 'Боковая кнопка мыши 1', 'マウスサイドボタン1'),
+    'Botão lateral 2 do mouse': ('Mouse side button 2', 'Botón lateral 2 del ratón', 'Bouton latéral 2 de la souris',
+                                 'Maus-Seitentaste 2', 'Tasto laterale 2 del mouse', 'Boczny przycisk myszy 2',
+                                 'Боковая кнопка мыши 2', 'マウスサイドボタン2'),
+    'Roda do mouse para cima': ('Mouse wheel up', 'Rueda del ratón arriba', 'Molette vers le haut', 'Mausrad hoch',
+                                'Rotella su', 'Kółko myszy w górę', 'Колесо мыши вверх', 'ホイール上'),
+    'Roda do mouse para baixo': ('Mouse wheel down', 'Rueda del ratón abajo', 'Molette vers le bas', 'Mausrad runter',
+                                 'Rotella giù', 'Kółko myszy w dół', 'Колесо мыши вниз', 'ホイール下'),
+}
+
 # The art is the player's own dump's (sce_sys), read at run time: no game file in the repository.
 ART = ["sce_sys/pic1.png", "sce_sys/pic0.png"]
 # Folders the player can change; empty is the default. {key: (text key, default)}.
@@ -703,7 +881,7 @@ KEYS = ("subtitle video game language ui_language display resolution fps upscale
         "motion_blur job_sleep profile play running starting ready debug log no_game no_exe borderless fullscreen "
         "windowed off q_native q_quality q_balanced q_performance q_ultra warn tab_live tab_startup note_live "
         "note_startup reset folders game_folder saves_folder cache_folder browse default_folder folders_note "
-        "no_eboot background_shaders").split()
+        "no_eboot background_shaders controls").split()
 TEXT_TABLE = {
     "pt": ["Port para PC", "Vídeo", "Jogo", "Idioma", "Idioma do launcher", "Modo de tela", "Resolução",
            "Limite de FPS", "Upscaler", "Qualidade do upscaler", "VSync", "Mostrar FPS no jogo", "Motion blur",
@@ -722,7 +900,7 @@ TEXT_TABLE = {
            "Padrão",
            "A atualização é procurada ao lado da pasta do jogo, com '-patch' no nome. Mudar a pasta de saves ou de cache não move os arquivos: o jogo começa sem saves, ou recompila os shaders.",
            "Esta pasta não tem eboot.bin",
-           "Compilar shaders em segundo plano"],
+           "Compilar shaders em segundo plano", "Controles"],
     "en": ["PC port", "Video", "Game", "Language", "Launcher language", "Display mode", "Resolution",
            "FPS limit", "Upscaler", "Upscaler quality", "VSync", "Show FPS in game", "Motion blur",
            "Reduce idle CPU use", "Record a performance profile (about 10% fewer FPS)", "PLAY", "RUNNING", "STARTING...",
@@ -739,7 +917,7 @@ TEXT_TABLE = {
            "Default",
            "The update is looked for beside the game folder, with '-patch' in its name. Changing the saves or cache folder does not move the files: the game starts with no saves, or compiles its shaders again.",
            "This folder has no eboot.bin",
-           "Compile shaders in the background"],
+           "Compile shaders in the background", "Controls"],
     "es": ["Port para PC", "Vídeo", "Juego", "Idioma", "Idioma del launcher", "Modo de pantalla",
            "Resolución", "Límite de FPS", "Upscaler", "Calidad del upscaler", "VSync", "Mostrar FPS en el juego",
            "Desenfoque de movimiento", "Reducir el uso de CPU inactiva",
@@ -757,7 +935,7 @@ TEXT_TABLE = {
            "Predeterminada",
            "La actualización se busca junto a la carpeta del juego, con '-patch' en el nombre. Cambiar la carpeta de partidas o de caché no mueve los archivos: el juego empieza sin partidas o vuelve a compilar los shaders.",
            "Esta carpeta no tiene eboot.bin",
-           "Compilar shaders en segundo plano"],
+           "Compilar shaders en segundo plano", "Controles"],
     "fr": ["Portage PC", "Vidéo", "Jeu", "Langue", "Langue du launcher", "Mode d'affichage", "Résolution",
            "Limite d'IPS", "Upscaler", "Qualité de l'upscaler", "VSync", "Afficher les IPS en jeu", "Flou de mouvement",
            "Réduire l'usage du CPU au repos", "Enregistrer un profil de performance (environ 10 % d'IPS en moins)", "JOUER",
@@ -775,7 +953,7 @@ TEXT_TABLE = {
            "Par défaut",
            "La mise à jour est cherchée à côté du dossier du jeu, avec '-patch' dans son nom. Changer le dossier des sauvegardes ou du cache ne déplace pas les fichiers : le jeu démarre sans sauvegardes ou recompile ses shaders.",
            "Ce dossier ne contient pas eboot.bin",
-           "Compiler les shaders en arrière-plan"],
+           "Compiler les shaders en arrière-plan", "Commandes"],
     "de": ["PC-Port", "Video", "Spiel", "Sprache", "Launcher-Sprache", "Anzeigemodus", "Auflösung", "FPS-Limit",
            "Upscaler", "Upscaler-Qualität", "VSync", "FPS im Spiel anzeigen", "Bewegungsunschärfe",
            "CPU-Last im Leerlauf senken", "Leistungsprofil aufzeichnen (etwa 10 % weniger FPS)", "SPIELEN", "LÄUFT",
@@ -793,7 +971,7 @@ TEXT_TABLE = {
            "Standard",
            "Das Update wird neben dem Spielordner gesucht, mit '-patch' im Namen. Ein anderer Ordner für Spielstände oder Cache verschiebt die Dateien nicht: Das Spiel startet ohne Spielstände oder kompiliert die Shader neu.",
            "Dieser Ordner enthält keine eboot.bin",
-           "Shader im Hintergrund kompilieren"],
+           "Shader im Hintergrund kompilieren", "Steuerung"],
     "it": ["Port per PC", "Video", "Gioco", "Lingua", "Lingua del launcher", "Modalità schermo",
            "Risoluzione", "Limite FPS", "Upscaler", "Qualità dell'upscaler", "VSync", "Mostra FPS in gioco",
            "Sfocatura di movimento", "Riduci l'uso della CPU inattiva",
@@ -811,7 +989,7 @@ TEXT_TABLE = {
            "Predefinita",
            "L'aggiornamento viene cercato accanto alla cartella del gioco, con '-patch' nel nome. Cambiare la cartella dei salvataggi o della cache non sposta i file: il gioco parte senza salvataggi o ricompila gli shader.",
            "Questa cartella non contiene eboot.bin",
-           "Compila gli shader in background"],
+           "Compila gli shader in background", "Comandi"],
     "pl": ["Port na PC", "Obraz", "Gra", "Język", "Język launchera", "Tryb ekranu", "Rozdzielczość", "Limit FPS",
            "Upscaler", "Jakość upscalera", "VSync", "Pokazuj FPS w grze", "Rozmycie ruchu", "Mniejsze użycie CPU w bezczynności",
            "Nagrywaj profil wydajności (około 10% mniej FPS)", "GRAJ", "URUCHOMIONO", "URUCHAMIANIE...", "Gotowe", "Debug",
@@ -828,7 +1006,7 @@ TEXT_TABLE = {
            "Domyślny",
            "Aktualizacja jest szukana obok folderu gry, z '-patch' w nazwie. Zmiana folderu zapisów lub pamięci podręcznej nie przenosi plików: gra zacznie bez zapisów albo ponownie skompiluje shadery.",
            "Ten folder nie zawiera eboot.bin",
-           "Kompiluj shadery w tle"],
+           "Kompiluj shadery w tle", "Sterowanie"],
     "ru": ["Порт для ПК", "Видео", "Игра", "Язык", "Язык лаунчера", "Режим экрана", "Разрешение", "Лимит FPS",
            "Апскейлер", "Качество апскейлера", "VSync", "Показывать FPS в игре", "Размытие в движении",
            "Снизить нагрузку на ЦП в простое", "Записывать профиль производительности (примерно на 10% меньше FPS)", "ИГРАТЬ",
@@ -846,7 +1024,7 @@ TEXT_TABLE = {
            "По умолчанию",
            "Обновление ищется рядом с папкой игры, с '-patch' в имени. Смена папки сохранений или кэша не переносит файлы: игра начнётся без сохранений или заново скомпилирует шейдеры.",
            "В этой папке нет eboot.bin",
-           "Компилировать шейдеры в фоне"],
+           "Компилировать шейдеры в фоне", "Управление"],
     "ja": ["PC移植版", "映像", "ゲーム", "言語", "ランチャーの言語", "表示モード", "解像度", "FPS上限", "アップスケーラー",
            "アップスケーラーの品質", "VSync", "ゲーム内にFPSを表示", "モーションブラー", "待機時のCPU使用を減らす",
            "パフォーマンスプロファイルを記録(FPSが約10%低下)", "プレイ", "実行中", "起動中...", "準備完了", "デバッグ", "ログを開く",
@@ -862,7 +1040,7 @@ TEXT_TABLE = {
            "既定",
            "アップデートはゲームフォルダーの隣にある名前に「-patch」が付いたフォルダーから探します。セーブやキャッシュのフォルダーを変更してもファイルは移動しません。セーブなしで始まるか、シェーダーが再コンパイルされます。",
            "このフォルダーには eboot.bin がありません",
-           "シェーダーをバックグラウンドでコンパイル"],
+           "シェーダーをバックグラウンドでコンパイル", "操作設定"],
 }
 TEXTS = {code: dict(zip(KEYS, values)) for code, values in TEXT_TABLE.items()}
 
@@ -896,6 +1074,71 @@ def write_ini(changes, path=None):
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     os.replace(temporary, path)
+
+
+def read_controls(ini):
+    """{action: [(kind, name) or None] * CONTROL_SLOTS}: the defaults with the file's maps applied as
+    runtime_pad.c applies them (an action's first entry in a map replaces its sources of that kind)."""
+    bindings = {action: list(sources) for action, sources in DEFAULT_CONTROLS.items()}
+    keys_only = {action for _, rows in CONTROLS for action, _, only in rows if only}
+    for kind, spec in (("key", ini.get("key_map", "")), ("mouse", ini.get("mouse_map", ""))):
+        replaced = set()
+        for entry in spec.split(","):
+            if "=" not in entry:
+                continue
+            action, name = (part.strip() for part in entry.split("=", 1))
+            action = "touchpad_left" if action.lower() == "touchpad" else action.lower()
+            if kind == "mouse":
+                name = name.lower()
+            if action not in bindings or (kind == "mouse" and (action in keys_only or name and name not in MOUSE_NAMES)):
+                continue
+            if action not in replaced:
+                replaced.add(action)
+                bindings[action] = [s for s in bindings[action] if s[0] != kind]
+            if name:
+                bindings[action].append((kind, name))
+    return {action: (sources + [None] * CONTROL_SLOTS)[:CONTROL_SLOTS] for action, sources in bindings.items()}
+
+
+def control_maps(bindings):
+    """The key_map and mouse_map values of these bindings: complete, every action listed ("id=" for
+    none), like the in-game menu writes them."""
+    keys_only = {action for _, rows in CONTROLS for action, _, only in rows if only}
+    keys, mouse = [], []
+    for action, sources in bindings.items():
+        names = {kind: [s[1] for s in sources if s and s[0] == kind] for kind in ("key", "mouse")}
+        keys += [f"{action}={name}" for name in names["key"]] or [f"{action}="]
+        if action not in keys_only:
+            mouse += [f"{action}={name}" for name in names["mouse"]] or [f"{action}="]
+    return ",".join(keys), ",".join(mouse)
+
+
+def key_from_event(keysym, keycode):
+    """The SDL name of a key Tk reported (keycode: the Windows virtual key); None if unknown."""
+    if keysym in KEYSYM_NAMES:
+        return KEYSYM_NAMES[keysym]
+    try:
+        scan = ctypes.windll.user32.MapVirtualKeyW(keycode, 0)   # MAPVK_VK_TO_VSC
+    except (AttributeError, OSError):
+        return None
+    return SCAN_NAMES.get(scan)
+
+
+def key_label(name):
+    """A key's text in Portuguese (translated by the caller): the character the player's keyboard
+    layout has at that place for letters, digits and signs, else the SDL name."""
+    if name in KEY_LABELS:
+        return KEY_LABELS[name]
+    scan = next((s for s, n in SCAN_NAMES.items() if n.lower() == name.lower()), None)
+    if scan is not None and len(SCAN_NAMES[scan]) == 1:
+        try:
+            user32 = ctypes.windll.user32
+            char = user32.MapVirtualKeyW(user32.MapVirtualKeyW(scan, 1), 2) & 0x7FFF   # VSC_TO_VK, VK_TO_CHAR
+            if char > 32:
+                return chr(char).upper()
+        except (AttributeError, OSError):
+            pass
+    return name.upper() if len(name) == 1 else name
 
 
 def read_switches(path=None):
@@ -1073,6 +1316,7 @@ class Launcher(tk.Tk):
         self.was_running = False
         self.debug_window = None
         self.folders_window = None
+        self.controls_window = None
         self.language = read_ui_language()
         self.folders = read_folders()
         self.title("The Last of Us Remastered")
@@ -1112,7 +1356,7 @@ class Launcher(tk.Tk):
     def build(self):
         """The whole window: called again when the launcher's language changes."""
         for child in self.winfo_children():
-            if child not in (self.debug_window, self.folders_window):
+            if child not in (self.debug_window, self.folders_window, self.controls_window):
                 child.destroy()
         ini, switches = read_ini(), read_switches()
         canvas = self.canvas = tk.Canvas(self, width=self.WIDTH, height=self.HEIGHT, bg=BG, highlightthickness=0)
@@ -1163,7 +1407,7 @@ class Launcher(tk.Tk):
                                          font=("Segoe UI", 9))
         x = self.WIDTH - 44
         for text, command in ((self.t("debug"), self.open_debug), (self.t("log"), self.open_log),
-                              (self.t("folders"), self.open_folders)):
+                              (self.t("folders"), self.open_folders), (self.t("controls"), self.open_controls)):
             x = canvas.bbox(self.link(canvas, x, text, command))[0] - 18
         self.ready_message = self.check_install()
 
@@ -1218,9 +1462,9 @@ class Launcher(tk.Tk):
         window = self.debug_window
         if window is not None and window.winfo_exists():
             window.destroy()
-        window = self.folders_window
-        if window is not None and window.winfo_exists():
-            window.destroy()
+        for window in (self.folders_window, self.controls_window):
+            if window is not None and window.winfo_exists():
+                window.destroy()
         self.build()
 
     def check_install(self):
@@ -1309,9 +1553,10 @@ class Launcher(tk.Tk):
         return outer, body
 
     def debug_text(self, text):
-        """A debug menu text in the launcher's language."""
-        if self.language in DEBUG_LANGUAGES and text in DEBUG_TEXT:
-            return DEBUG_TEXT[text][DEBUG_LANGUAGES.index(self.language)]
+        """A debug or controls window text in the launcher's language."""
+        table = DEBUG_TEXT if text in DEBUG_TEXT else CONTROL_TEXT
+        if self.language in DEBUG_LANGUAGES and text in table:
+            return table[text][DEBUG_LANGUAGES.index(self.language)]
         return text
 
     def group(self, body, title):
@@ -1376,6 +1621,157 @@ class Launcher(tk.Tk):
             for _, items in STARTUP:
                 for _, name, _, _, default in items:
                     variables[name].set(default)
+
+        self.reset_link(outer, reset)
+
+    def open_controls(self):
+        if self.controls_window is not None and self.controls_window.winfo_exists():
+            self.controls_window.lift()
+            return
+        self.controls_window = window = tk.Toplevel(self, bg=BG)
+        window.title(self.t("controls"))
+        window.geometry(f"780x640+{self.winfo_rootx() + 40}+{self.winfo_rooty() + 20}")
+        tabs = ttk.Notebook(window)
+        tabs.pack(fill="both", expand=True, padx=14, pady=14)
+        self.keys_tab(window, tabs)
+        self.mouse_tab(tabs)
+
+    def keys_tab(self, window, tabs):
+        """Two keys or mouse buttons per action: click a box, then press it (Esc cancels, Delete clears)."""
+        outer, body = self.scroll_area(tabs, self.debug_text("Teclado e mouse"), self.debug_text(
+            "Clique numa caixa e pressione a tecla ou o botão do mouse. Esc cancela, Delete limpa.\n"
+            "Movimento e câmera aceitam só teclas. Vale na próxima vez que o jogo abrir."))
+        bindings = read_controls(read_ini())
+        keys_only = {action for _, rows in CONTROLS for action, _, only in rows if only}
+        boxes = {}
+        capture = []   # [action, slot] while a box waits for its key or button
+
+        def show():
+            for (action, slot), box in boxes.items():
+                source = bindings[action][slot]
+                if source is None:
+                    box.config(text="—", fg=MUTED)
+                else:
+                    kind, name = source
+                    box.config(text=self.debug_text(MOUSE_NAMES[name] if kind == "mouse" else key_label(name)), fg=TEXT)
+
+        def assign(source):
+            action, slot = capture
+            capture.clear()
+            if source is not None:   # a key or button does one thing: it leaves the action that had it
+                same = (source[0], source[1].lower())
+                for sources in bindings.values():
+                    sources[:] = [None if s and (s[0], s[1].lower()) == same else s for s in sources]
+            bindings[action][slot] = source
+            write_ini(dict(zip(("key_map", "mouse_map"), control_maps(bindings))))
+            show()
+
+        def press_box(event, action, slot):
+            if capture:
+                return press_mouse(MOUSE_BUTTONS.get(event.num))
+            if event.num == 1:
+                capture[:] = [action, slot]
+                boxes[action, slot].config(text=self.debug_text("Pressione..."), fg=ACCENT)
+                boxes[action, slot].focus_set()
+            return "break"
+
+        def press_mouse(name):
+            if not capture:
+                return None
+            if name is not None and capture[0] not in keys_only:
+                assign(("mouse", name))
+            return "break"
+
+        def press_key(event):
+            if not capture:
+                return None
+            if event.keysym == "Escape":
+                capture.clear()
+                show()
+            elif event.keysym == "Delete":
+                assign(None)
+            else:
+                name = key_from_event(event.keysym, event.keycode)
+                if name:
+                    assign(("key", name))
+            return "break"
+
+        for title, rows in CONTROLS:
+            self.group(body, title)
+            for action, text, _ in rows:
+                row = tk.Frame(body, bg=PANEL)
+                row.pack(anchor="w", pady=1)
+                tk.Label(row, text=self.debug_text(text), width=32, anchor="w", bg=PANEL, fg=TEXT,
+                         font=("Segoe UI", 10)).pack(side="left")
+                for slot in range(CONTROL_SLOTS):
+                    box = tk.Label(row, width=26, bg=BG, fg=TEXT, font=("Segoe UI", 9), cursor="hand2", pady=2,
+                                   highlightthickness=1, highlightbackground="#2c2c2c")
+                    box.pack(side="left", padx=(6, 0))
+                    box.bind("<ButtonPress>", lambda e, a=action, s=slot: press_box(e, a, s))
+                    boxes[action, slot] = box
+        window.bind("<KeyPress>", press_key)
+        window.bind("<ButtonPress>", lambda e: press_mouse(MOUSE_BUTTONS.get(e.num)))
+        window.bind("<MouseWheel>", lambda e: press_mouse("wheel_up" if e.delta > 0 else "wheel_down"))
+
+        def reset():
+            capture.clear()
+            write_ini({"key_map": "", "mouse_map": ""})
+            bindings.clear()
+            bindings.update(read_controls({}))
+            show()
+
+        self.reset_link(outer, reset)
+        show()
+        window.press_key, window.press_box = press_key, press_box   # (tests)
+
+    def mouse_tab(self, tabs):
+        outer, body = self.scroll_area(tabs, self.debug_text("Mouse"), self.debug_text("Vale na próxima vez que o jogo abrir."))
+        ini = read_ini()
+
+        def percent(key):
+            try:
+                return round(float(ini.get(key, "1")) * 100)
+            except ValueError:
+                return 100
+
+        enabled = tk.BooleanVar(value=ini.get("mouse", "1") != "0")
+        invert = tk.BooleanVar(value=ini.get("mouse_invert", "0") == "1")
+        invert_x = tk.BooleanVar(value=ini.get("mouse_invert_x", "0") == "1")
+        sens, aim = tk.IntVar(value=percent("mouse_sens")), tk.IntVar(value=percent("mouse_aim_sens"))
+        pending = []
+
+        def save():
+            write_ini({"mouse": int(enabled.get()), "mouse_sens": f"{sens.get() / 100:.2f}",
+                       "mouse_aim_sens": f"{aim.get() / 100:.2f}", "mouse_invert": int(invert.get()),
+                       "mouse_invert_x": int(invert_x.get())})
+
+        def save_later(_=None):   # a slider writes once it rests
+            for job in pending:
+                self.after_cancel(job)
+            pending[:] = [self.after(300, save)]
+
+        tk.Frame(body, bg=PANEL, height=6).pack()
+        self.option(body, "Usar o mouse", enabled, save)
+        for text, variable, top in (("Sensibilidade do mouse", sens, 500), ("Sensibilidade ao mirar", aim, 1000)):
+            self.group(body, text)
+            row = tk.Frame(body, bg=PANEL)
+            row.pack(anchor="w")
+            tk.Scale(row, from_=25, to=top, resolution=5, orient="horizontal", length=420, variable=variable,
+                     showvalue=False, command=save_later, bg=PANEL, fg=TEXT, troughcolor=BG, activebackground=ACCENT,
+                     highlightthickness=0, bd=0).pack(side="left")
+            tk.Label(row, textvariable=variable, width=5, anchor="e", bg=PANEL, fg=TEXT, font=("Segoe UI", 10)).pack(side="left")
+            tk.Label(row, text="%", bg=PANEL, fg=MUTED, font=("Segoe UI", 10)).pack(side="left")
+        tk.Frame(body, bg=PANEL, height=8).pack()
+        self.option(body, "Inverter eixo vertical", invert, save)
+        self.option(body, "Inverter eixo horizontal", invert_x, save)
+
+        def reset():
+            enabled.set(True)
+            invert.set(False)
+            invert_x.set(False)
+            sens.set(100)
+            aim.set(100)
+            save()
 
         self.reset_link(outer, reset)
 

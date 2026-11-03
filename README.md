@@ -26,9 +26,15 @@ that is not fixed yet, and with rough edges.
     an area is played. The game's own frame watchdog is patched from 2 s to 20 s for that
     (`TLOU_FIXES=none` leaves the game unpatched). If a load ever hangs, start with
     `GOW3_FRAMES_IN_FLIGHT=0` (slower).
-- **Not available for this game yet:** mouse camera (the mouse drives the right stick instead),
-  the draw distance sliders and keyboard button prompts, which need the game's own camera code,
-  settings block and prompt textures to be located.
+  - Shots pass through some parts of objects with no effect, though they hit walls and most
+    objects where the crosshair is. One firefly pendant, hanging from a tree in the courtyard
+    after the quarantine zone, cannot be shot down for that reason. Ruled out so far: the
+    renderer's CPU/GPU data exchange, the port's patches and red-zone protection, and the CPU's
+    approximate math instructions.
+- **Not available for this game yet:** a true mouse camera (the mouse drives the right stick
+  instead, though no longer capped at the stick's top speed), the draw distance sliders and
+  keyboard button prompts, which need the game's own camera code, settings block and prompt
+  textures to be located.
 
 ## Requirements
 

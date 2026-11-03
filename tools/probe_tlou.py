@@ -110,6 +110,16 @@ CHEATS = {
 # spinning (pause at 0xC87D65). The flag is treated as on in the worker loop, its re-check before
 # waiting and the submit path, as in the Uncharted ports of the same engine.
 JOB_SLEEP = [(0xC87D63, "7304", "EB04"), (0xC87D96, "741B", "9090"), (0xC873E1, "742D", "9090")]
+# The PS4 Pro's shadows (TLOU_PRO_SHADOWS=0 keeps the base PS4's). On a Pro (sceKernelIsNeoMode, the
+# engine's IsNeo at 0xB28670) the game sets the render options' (0x181A770) "Neo Enhancements" mode
+# (+0x7FC: resolution, framerate, quality), which picks the resolution (+0xF0), checkerboard (+0x7D0)
+# and "Toggle On High Detailed Mode" (+0x21D, on in framerate and quality). That flag is read only by
+# the frame's shadow setup (0xFD31): the sun's cascades go to 4096x2048 instead of 2560x1280 (render
+# target 0x3C instead of 0x3B), and the local lights' shadow memory, which the base PS4 always splits
+# into 16 maps, is split by the number of lights casting shadows (targets 0x3D-0x41: 1 map of 4 times
+# the side, 2, 4, 8 or 16). The base PS4 creates those targets too. The flag's default (the render
+# options' initializer) is on; the rest of the Pro mode stays off (+0x42C, a faster depth clear, too).
+PRO_SHADOWS = [(0xAEB313, "C6831D02000000", "C6831D02000001")]
 # Fixes, on in every run.
 FIXES = {
     # 23 Oct 2026 (the house, after the autosave before the basement): the renderer's frame
@@ -329,6 +339,8 @@ def main():
     patches = dict(FIXES) if os.environ.get("TLOU_FIXES") != "none" else {}
     if os.environ.get("TLOU_JOB_SLEEP") != "0":
         patches["job-sleep"] = JOB_SLEEP
+    if os.environ.get("TLOU_PRO_SHADOWS") != "0":
+        patches["pro-shadows"] = PRO_SHADOWS
     for name in [c.strip() for c in os.environ.get("TLOU_CHEATS", "flashlight").split(",") if c.strip()]:
         if name in CHEATS:
             patches[name] = CHEATS[name]

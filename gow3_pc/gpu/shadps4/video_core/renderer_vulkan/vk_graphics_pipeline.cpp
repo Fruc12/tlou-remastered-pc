@@ -298,11 +298,13 @@ GraphicsPipeline::GraphicsPipeline(
         });
     }
 
+    // gow3: one size for every stage (Instance::RequiredSubgroupSize), each stage only if allowed.
+    const u32 subgroup_size = instance.RequiredSubgroupSize(vk::ShaderStageFlagBits::eAllGraphics);
     const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
-        .requiredSubgroupSize = 64,
+        .requiredSubgroupSize = subgroup_size,
     };
     for (auto& stage : shader_stages) {
-        stage.pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr;
+        stage.pNext = instance.RequiredSubgroupSize(stage.stage) ? &subgroup_size_ci : nullptr;
     }
 
     const auto depth_format =

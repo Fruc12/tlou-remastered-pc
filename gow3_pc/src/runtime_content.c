@@ -71,7 +71,7 @@ static ABI int32_t param_int(uint32_t id,int32_t *out) {
 }
 static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint32_t *hits) {
     require_initialized();
-    if (service) { fputs("STOP: nonzero AppContent service label unsupported\n",stderr); exit(21); }
+    if (service) printf("Runtime: AppContent add-on list for service label %u: none mounted\n", service);
     if ((!capacity || !list) && !hits) return PARAMETER;
     /* No add-ons are mounted by this provider. Never touch unused list slots. */
     if (hits) *hits=0;

@@ -294,6 +294,17 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
                VK_VERSION_MAJOR(properties.apiVersion), VK_VERSION_MINOR(properties.apiVersion));
 
     CreateDevice();
+    // gow3 6 Nov 2026: what the shader translation depends on, in every log (Intel GPUs compile
+    // a shader at 8, 16 or 32 lanes; the wave64 lowering assumes the reported size).
+    std::printf("GPU: driver %s; subgroup size %u (range %u-%u, required-size stages %s, size "
+                "control %d, used %u for compute); max compute groups %u x %u x %u\n",
+                GetDriverVersionName().c_str(), vk11_props.subgroupSize, vk13_props.minSubgroupSize,
+                vk13_props.maxSubgroupSize, vk::to_string(vk13_props.requiredSubgroupSizeStages).c_str(),
+                int(vk13_features.subgroupSizeControl),
+                RequiredSubgroupSize(vk::ShaderStageFlagBits::eCompute),
+                properties.limits.maxComputeWorkGroupCount[0], properties.limits.maxComputeWorkGroupCount[1],
+                properties.limits.maxComputeWorkGroupCount[2]);
+    std::fflush(stdout);
     CollectPhysicalMemoryInfo();
     CollectImageFormatInfo();
     CollectToolingInfo();

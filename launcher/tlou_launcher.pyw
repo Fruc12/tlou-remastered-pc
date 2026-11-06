@@ -101,6 +101,7 @@ STARTUP = [
         ("Prefetch de pipelines", "GOW3_PREFETCH_PIPELINES", "1", "0", True),
         ("Proteção da red zone", "GOW3_RED_ZONE_REWRITE", "1", "0", True),
         ("Correção da chuva branca", "GOW3_RAIN_SCALE", "0.12", "1", True),
+        ("Diagnóstico de travamento da GPU (lento)", "GOW3_GPU_BREADCRUMBS", "1", "0", False),
     ]),
 ]
 
@@ -620,6 +621,15 @@ DEBUG_TEXT = {
         'Kopia maleńkich obrazów (ostrość celownika)',
         'Копия крошечных изображений (фокус прицела)',
         '極小画像のコピー(照準フォーカス)'),
+    'Diagnóstico de travamento da GPU (lento)': (
+        'GPU hang diagnostics (slow)',
+        'Diagnóstico de bloqueos de la GPU (lento)',
+        'Diagnostic des blocages du GPU (lent)',
+        'GPU-Hänger-Diagnose (langsam)',
+        'Diagnostica dei blocchi della GPU (lento)',
+        'Diagnostyka zawieszeń GPU (wolne)',
+        'Диагностика зависаний GPU (медленно)',
+        'GPUハング診断(低速)'),
     'Acesso direto à memória': (
         'Direct memory access',
         'Acceso directo a la memoria',

@@ -494,13 +494,109 @@ SubmitStack NoteSubmitCaller() {
 struct GpuCheckpoint { const char* operation{}; u64 first{},second{},sequence{}; };
 std::array<GpuCheckpoint,65536> gpu_checkpoints;
 std::atomic<u64> checkpoint_index{};
+
+// gow3 6 Nov 2026: GPU breadcrumbs (GOW3_GPU_BREADCRUMBS=1), the checkpoints on any GPU. The
+// checkpoints above need VK_NV_device_diagnostic_checkpoints (NVIDIA only); Intel GPUs lose the
+// device at the intro cutscene with nothing in the log to say which work hung. Outside a render
+// pass, each checkpoint waits for all earlier GPU work (a full barrier) and then writes its
+// sequence number into host-visible memory, which is still readable after the device is lost:
+// the GPU finished everything before the last number written, so the operation of that
+// checkpoint, or a draw of the render pass after it, is the one that hung. Slow: every
+// operation runs alone. Draws inside a render pass write nothing (no transfers there); the
+// pending list after a hang shows them.
+struct GpuBreadcrumbs {
+    vk::Buffer buffer{};
+    vk::DeviceMemory memory{};
+    volatile u32* mapped{};
+    bool enabled{};
+};
+GpuBreadcrumbs gpu_breadcrumbs;
+std::once_flag gpu_breadcrumbs_once;
+
+void InitGpuBreadcrumbs(const Instance& instance) {
+    const char* env = std::getenv("GOW3_GPU_BREADCRUMBS");
+    if (!env || env[0] != '1') {
+        return;
+    }
+    const auto device = instance.GetDevice();
+    auto [buffer_result, buffer] = device.createBuffer(vk::BufferCreateInfo{
+        .size = 256,
+        .usage = vk::BufferUsageFlagBits::eTransferDst,
+        .sharingMode = vk::SharingMode::eExclusive,
+    });
+    if (buffer_result != vk::Result::eSuccess) {
+        std::printf("GPU breadcrumbs: buffer not created (%s)\n", vk::to_string(buffer_result).c_str());
+        return;
+    }
+    const auto reqs = device.getBufferMemoryRequirements(buffer);
+    const auto props = instance.GetPhysicalDevice().getMemoryProperties();
+    const auto want = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+    s32 type = -1;
+    for (u32 i = 0; i < props.memoryTypeCount; ++i) {
+        const auto flags = props.memoryTypes[i].propertyFlags;
+        if (((reqs.memoryTypeBits >> i) & 1) && (flags & want) == want) {
+            // Uncached memory first: the GPU's writes land where the CPU reads them.
+            if (type < 0 || !(flags & vk::MemoryPropertyFlagBits::eHostCached)) {
+                type = static_cast<s32>(i);
+            }
+        }
+    }
+    if (type < 0) {
+        std::printf("GPU breadcrumbs: no host-visible memory for them\n");
+        device.destroyBuffer(buffer);
+        return;
+    }
+    auto [memory_result, memory] = device.allocateMemory(vk::MemoryAllocateInfo{
+        .allocationSize = reqs.size,
+        .memoryTypeIndex = static_cast<u32>(type),
+    });
+    if (memory_result != vk::Result::eSuccess) {
+        std::printf("GPU breadcrumbs: memory not allocated (%s)\n", vk::to_string(memory_result).c_str());
+        device.destroyBuffer(buffer);
+        return;
+    }
+    (void)device.bindBufferMemory(buffer, memory, 0);
+    auto [map_result, pointer] = device.mapMemory(memory, 0, VK_WHOLE_SIZE);
+    if (map_result != vk::Result::eSuccess) {
+        std::printf("GPU breadcrumbs: memory not mapped (%s)\n", vk::to_string(map_result).c_str());
+        device.freeMemory(memory);
+        device.destroyBuffer(buffer);
+        return;
+    }
+    gpu_breadcrumbs.buffer = buffer;
+    gpu_breadcrumbs.memory = memory;
+    gpu_breadcrumbs.mapped = static_cast<volatile u32*>(pointer);
+    gpu_breadcrumbs.mapped[0] = ~0u;
+    gpu_breadcrumbs.enabled = true;
+    std::printf("GPU breadcrumbs: on (memory type %d; the GPU runs one operation at a time)\n", type);
+    std::fflush(stdout);
+}
 }
 void Scheduler::Checkpoint(const char* operation,u64 first,u64 second) {
-    if (!instance.HasGpuCheckpoints()) return;
+    std::call_once(gpu_breadcrumbs_once, InitGpuBreadcrumbs, std::cref(instance));
+    const bool nv = instance.HasGpuCheckpoints();
+    if (!nv && !gpu_breadcrumbs.enabled) return;
     const u64 sequence=checkpoint_index.fetch_add(1);
     auto* marker=&gpu_checkpoints[sequence%gpu_checkpoints.size()];
     *marker={operation,first,second,sequence};
-    Record([marker](vk::CommandBuffer commands) { commands.setCheckpointNV(static_cast<const void*>(marker)); });
+    if (nv) {
+        Record([marker](vk::CommandBuffer commands) { commands.setCheckpointNV(static_cast<const void*>(marker)); });
+    }
+    if (gpu_breadcrumbs.enabled && !is_rendering) {
+        Record([buffer = gpu_breadcrumbs.buffer, value = static_cast<u32>(sequence)](vk::CommandBuffer commands) {
+            const vk::MemoryBarrier2 wait_all = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            };
+            commands.pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &wait_all,
+            });
+            commands.fillBuffer(buffer, 0, 4, value);
+        });
+    }
 }
 /// Set by the buffer cache: prints which arena and guest address a GPU address belongs to.
 std::function<void(u64)> g_describe_gpu_address;
@@ -538,6 +634,28 @@ void DumpDeviceFault(const Instance& instance) {
     }
 }
 void DumpGpuCheckpoints(const Instance& instance) {
+    if (gpu_breadcrumbs.enabled) {
+        const u64 recorded=checkpoint_index.load();
+        const u32 low=gpu_breadcrumbs.mapped[0];
+        if (low==~0u) {
+            std::fprintf(stderr,"GPU breadcrumbs: none reached yet (%llu recorded)\n",(unsigned long long)recorded);
+        } else {
+            // The full sequence: the newest recorded one with these low 32 bits.
+            u64 reached=(recorded&~u64{0xffffffff})|low;
+            if (reached>=recorded && reached>=(u64{1}<<32)) reached-=u64{1}<<32;
+            std::fprintf(stderr,"GPU breadcrumbs: the GPU finished all work before sequence %llu "
+                         "(%llu recorded); the hang is that operation or a draw right after it\n",
+                         (unsigned long long)reached,(unsigned long long)recorded);
+            for (u64 sequence=reached>8 ? reached-8 : 0; sequence<recorded && sequence<=reached+40; ++sequence) {
+                const auto& marker=gpu_checkpoints[sequence%gpu_checkpoints.size()];
+                std::fprintf(stderr,"GPU breadcrumb %s sequence=%llu operation=%s values=%016llx,%016llx\n",
+                             sequence==reached ? ">>" : "  ",(unsigned long long)marker.sequence,
+                             marker.operation ? marker.operation : "?",
+                             (unsigned long long)marker.first,(unsigned long long)marker.second);
+            }
+        }
+        std::fflush(stderr);
+    }
     if (!instance.HasGpuCheckpoints()) return;
     const auto checkpoints=instance.GetGraphicsQueue().getCheckpointDataNV();
     const u64 recorded=checkpoint_index.load();

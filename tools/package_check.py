@@ -28,7 +28,9 @@ def main():
         elif path.suffix.lower() in FORBIDDEN and not inside_python:
             bad.append(str(relative))
         elif relative.parts[0] in ("launcher", "tools", "gow3_pc") or path.name == "TLOU Launcher.exe":
-            if path.suffix.lower() != ".dll" and any(word in path.read_bytes() for word in PRIVATE):
+            # Third-party binaries (MSYS2 DLLs; pip's .pyd extensions, iced-x86's built on a CI
+            # runner whose home folder name can match this one's) carry their own build paths.
+            if path.suffix.lower() not in (".dll", ".pyd") and any(word in path.read_bytes() for word in PRIVATE):
                 bad.append(f"{relative} (a path of this machine)")
     if bad:
         raise SystemExit("Not packaged, these should not ship:\n  " + "\n  ".join(bad))

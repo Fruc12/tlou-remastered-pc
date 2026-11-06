@@ -1,0 +1,85 @@
+# Builds the Windows release zip (tools/package_windows.sh) and attaches it to a GitHub release.
+# Push a tag starting with "v" (e.g. v0.1.7-intel-test) to build and publish it; tags with a
+# "-" in the name are published as pre-releases. Run it by hand (Actions tab) to build only:
+# the zip is then kept as a workflow artifact.
+name: Windows release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      # Line-ending conversion breaks the FSR-Vulkan patches (README, Building).
+      - name: No line-ending conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The Windows Python the package ships (Tkinter comes with it; Pillow for the launcher art).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python packages
+        shell: bash
+        run: |
+          python -m pip install --no-cache-dir pillow
+          python -m pip install --no-cache-dir --target gow3_pc/out/pydeps iced-x86
+
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git patch
+            mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-vulkan-headers mingw-w64-clang-x86_64-vulkan-loader
+            mingw-w64-clang-x86_64-vulkan-memory-allocator mingw-w64-clang-x86_64-glslang
+            mingw-w64-clang-x86_64-sdl3 mingw-w64-clang-x86_64-fmt mingw-w64-clang-x86_64-boost
+            mingw-w64-clang-x86_64-robin-map mingw-w64-clang-x86_64-xxhash
+            mingw-w64-clang-x86_64-ffmpeg mingw-w64-clang-x86_64-zydis
+            mingw-w64-clang-x86_64-spirv-tools mingw-w64-clang-x86_64-spirv-headers
+            mingw-w64-clang-x86_64-spirv-cross
+
+      # The scripts run from Git Bash, as on a developer's machine (package_windows.sh header).
+      - name: Build and package
+        shell: bash
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+          GOW3_PGO: "off"
+        run: |
+          export MSYS2_ROOT="$(cygpath -u "$MSYS2_ROOT")"
+          export PYTHON_HOME="$(python -c 'import sys, os; print(os.path.dirname(sys.executable))')"
+          echo "MSYS2: $MSYS2_ROOT; Python: $PYTHON_HOME"
+          if ! bash tools/package_windows.sh; then
+            echo "::group::GPU build log"
+            cat gow3_pc/out/gpu-build.log 2>/dev/null | tail -200 || true
+            echo "::endgroup::"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TLOU-Remastered-windows
+          path: dist/TLOU-Remastered-windows.zip
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/TLOU-Remastered-windows.zip
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

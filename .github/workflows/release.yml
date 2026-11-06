@@ -1,12 +1,14 @@
 # Builds the Windows release zip (tools/package_windows.sh) and attaches it to a GitHub release.
-# Push a tag starting with "v" (e.g. v0.1.7-intel-test) to build and publish it; tags with a
-# "-" in the name are published as pre-releases. Run it by hand (Actions tab) to build only:
-# the zip is then kept as a workflow artifact.
+# Push a tag starting with "v" (e.g. v0.1.8) to build and publish it under that tag; a push to the
+# Intel test branch publishes it as the v0.1.7-intel-test release (GitHub creates the tag). Tags
+# with a "-" in the name are published as pre-releases. Run it by hand (Actions tab) to build
+# only: the zip is then kept as a workflow artifact.
 name: Windows release
 
 on:
   push:
     tags: ["v*"]
+    branches: ["claude/inspiring-thompson-s6uvm2"]
   workflow_dispatch:
 
 permissions:
@@ -77,9 +79,12 @@ jobs:
           path: dist/TLOU-Remastered-windows.zip
 
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.1.7-intel-test' }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.1.7-intel-test (Intel GPU test build)' }}
           files: dist/TLOU-Remastered-windows.zip
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ github.ref_type != 'tag' || contains(github.ref_name, '-') }}
           generate_release_notes: true
